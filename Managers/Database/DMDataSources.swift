@@ -90,46 +90,70 @@ extension DatabaseManager {
     func replaceTracks(for source: LibraryDataSource, tracks: [FullTrack]) async throws {
         try await dbQueue.write { db in
             let cache = ScanLookupCache()
+            let sourceId = source.id.uuidString
+            let existingTrackRows = try Row.fetchAll(
+                db,
+                sql: """
+                    SELECT id, path, remote_item_id
+                    FROM tracks
+                    WHERE source_id = ?
+                    """,
+                arguments: [sourceId]
+            )
+            let existingTrackKeys = existingTrackRows.compactMap { row -> (String, Int64)? in
+                let trackId: Int64 = row["id"]
+                let resourceLocator: String = row["path"]
+                let remoteItemId: String? = row["remote_item_id"]
+                return (stableRemoteTrackKey(
+                    sourceId: sourceId,
+                    remoteItemId: remoteItemId,
+                    resourceLocator: resourceLocator
+                ), trackId)
+            }
+            let existingTrackIdsByKey = Dictionary(uniqueKeysWithValues: existingTrackKeys)
 
-            _ = try Track
-                .filter(Track.Columns.sourceId == source.id.uuidString)
-                .deleteAll(db)
+            var retainedTrackKeys = Set<String>()
+            var trackArtworkByTrackId: [Int64: Data] = [:]
+            var albumArtworkByAlbumId: [Int64: Data] = [:]
 
             for track in tracks {
                 var mutableTrack = track
                 mutableTrack.folderId = nil
-                mutableTrack.sourceId = source.id.uuidString
+                mutableTrack.sourceId = sourceId
                 mutableTrack.sourceKind = source.kind
+                let trackKey = stableRemoteTrackKey(
+                    sourceId: sourceId,
+                    remoteItemId: mutableTrack.remoteItemId,
+                    resourceLocator: mutableTrack.resourceLocator
+                )
+                retainedTrackKeys.insert(trackKey)
 
-                try processTrackAlbum(&mutableTrack, in: db, cache: cache)
-                try mutableTrack.insert(db)
-
-                if mutableTrack.trackId == nil {
-                    mutableTrack.trackId = db.lastInsertedRowID
+                if let existingTrackId = existingTrackIdsByKey[trackKey] {
+                    mutableTrack.trackId = existingTrackId
                 }
 
-                try processTrackArtists(mutableTrack, in: db, cache: cache)
-                try processTrackGenres(mutableTrack, in: db, cache: cache)
-
-                if let artworkData = mutableTrack.trackArtworkData ?? mutableTrack.albumArtworkData,
-                   !artworkData.isEmpty,
-                   let trackId = mutableTrack.trackId {
-                    let artistIds = try TrackArtist
-                        .filter(TrackArtist.Columns.trackId == trackId)
-                        .select(TrackArtist.Columns.artistId, as: Int64.self)
-                        .distinct()
-                        .fetchAll(db)
-
-                    for artistId in artistIds {
-                        try updateArtistArtwork(artistId, artworkData: artworkData, in: db)
-                    }
-
-                    if let albumId = mutableTrack.albumId {
-                        try updateAlbumArtwork(albumId, artworkData: artworkData, in: db)
-                    }
-                }
+                try upsertRemoteTrack(&mutableTrack, in: db, cache: cache)
+                collectArtworkCandidates(
+                    from: mutableTrack,
+                    trackArtworkByTrackId: &trackArtworkByTrackId,
+                    albumArtworkByAlbumId: &albumArtworkByAlbumId
+                )
             }
 
+            let staleTrackIds = existingTrackKeys.compactMap { trackKey, trackId in
+                retainedTrackKeys.contains(trackKey) ? nil : trackId
+            }
+            for chunk in staleTrackIds.chunked(into: 400) {
+                _ = try Track
+                    .filter(chunk.contains(Track.Columns.trackId))
+                    .deleteAll(db)
+            }
+
+            try applyArtworkCandidates(
+                trackArtworkByTrackId: trackArtworkByTrackId,
+                albumArtworkByAlbumId: albumArtworkByAlbumId,
+                in: db
+            )
             try updateEntityStats(in: db)
         }
 
@@ -181,6 +205,8 @@ extension DatabaseManager {
 
         try await dbQueue.write { db in
             let cache = ScanLookupCache()
+            var trackArtworkByTrackId: [Int64: Data] = [:]
+            var albumArtworkByAlbumId: [Int64: Data] = [:]
 
             for originalTrack in tracks {
                 guard let trackId = originalTrack.trackId else { continue }
@@ -216,23 +242,20 @@ extension DatabaseManager {
 
                 if let artworkData = artworkByItemID[itemId],
                    !artworkData.isEmpty {
-                    let artistIds = try TrackArtist
-                        .filter(TrackArtist.Columns.trackId == trackId)
-                        .select(TrackArtist.Columns.artistId, as: Int64.self)
-                        .distinct()
-                        .fetchAll(db)
-
-                    for artistId in artistIds {
-                        try updateArtistArtwork(artistId, artworkData: artworkData, in: db)
-                    }
+                    trackArtworkByTrackId[trackId] = artworkData
 
                     if let albumId = enrichedTrack.albumId,
                        enrichedTrack.album != "Unknown Album" {
-                        try updateAlbumArtwork(albumId, artworkData: artworkData, in: db)
+                        albumArtworkByAlbumId[albumId] = albumArtworkByAlbumId[albumId] ?? artworkData
                     }
                 }
             }
 
+            try applyArtworkCandidates(
+                trackArtworkByTrackId: trackArtworkByTrackId,
+                albumArtworkByAlbumId: albumArtworkByAlbumId,
+                in: db
+            )
             try updateEntityStats(in: db)
         }
     }
@@ -260,6 +283,90 @@ extension DatabaseManager {
 }
 
 private extension DatabaseManager {
+    func stableRemoteTrackKey(sourceId: String, remoteItemId: String?, resourceLocator: String) -> String {
+        if let remoteItemId, !remoteItemId.isEmpty {
+            return "item:\(sourceId):\(remoteItemId)"
+        }
+
+        return "path:\(resourceLocator)"
+    }
+
+    func upsertRemoteTrack(_ track: inout FullTrack, in db: Database, cache: ScanLookupCache) throws {
+        try processTrackAlbum(&track, in: db, cache: cache)
+
+        if let trackId = track.trackId {
+            try track.update(db)
+
+            try TrackArtist
+                .filter(TrackArtist.Columns.trackId == trackId)
+                .deleteAll(db)
+
+            try TrackGenre
+                .filter(TrackGenre.Columns.trackId == trackId)
+                .deleteAll(db)
+        } else {
+            try track.insert(db)
+
+            if track.trackId == nil {
+                track.trackId = db.lastInsertedRowID
+            }
+        }
+
+        guard track.trackId != nil else {
+            throw DatabaseError.invalidTrackId
+        }
+
+        try processTrackArtists(track, in: db, cache: cache)
+        try processTrackGenres(track, in: db, cache: cache)
+    }
+
+    func collectArtworkCandidates(
+        from track: FullTrack,
+        trackArtworkByTrackId: inout [Int64: Data],
+        albumArtworkByAlbumId: inout [Int64: Data]
+    ) {
+        guard let artworkData = track.trackArtworkData ?? track.albumArtworkData,
+              !artworkData.isEmpty,
+              let trackId = track.trackId else {
+            return
+        }
+
+        trackArtworkByTrackId[trackId] = artworkData
+
+        if let albumId = track.albumId {
+            albumArtworkByAlbumId[albumId] = albumArtworkByAlbumId[albumId] ?? artworkData
+        }
+    }
+
+    func applyArtworkCandidates(
+        trackArtworkByTrackId: [Int64: Data],
+        albumArtworkByAlbumId: [Int64: Data],
+        in db: Database
+    ) throws {
+        if !trackArtworkByTrackId.isEmpty {
+            var artistArtworkByArtistId: [Int64: Data] = [:]
+
+            for chunk in Array(trackArtworkByTrackId.keys).chunked(into: 400) {
+                let relationships = try TrackArtist
+                    .filter(chunk.contains(TrackArtist.Columns.trackId))
+                    .fetchAll(db)
+
+                for relationship in relationships where artistArtworkByArtistId[relationship.artistId] == nil {
+                    guard let artworkData = trackArtworkByTrackId[relationship.trackId] else { continue }
+                    artistArtworkByArtistId[relationship.artistId] = artworkData
+                }
+            }
+
+            for (artistId, artworkData) in artistArtworkByArtistId {
+                try updateArtistArtwork(artistId, artworkData: artworkData, in: db)
+            }
+        }
+
+        for (albumId, artworkData) in albumArtworkByAlbumId {
+            try updateAlbumArtwork(albumId, artworkData: artworkData, in: db)
+        }
+    }
+
     func mergeEmbyDetails(from item: EmbyAudioItem, into track: inout FullTrack) {
         if let title = item.name?.trimmingCharacters(in: .whitespacesAndNewlines),
            !title.isEmpty,

@@ -139,6 +139,7 @@ public class PAudioPlayer: NSObject {
     private var currentEntryId: AudioEntryId?
     private var currentURL: URL?
     private var delegateBridge: SFBAudioPlayerDelegateBridge?
+    private var pauseWhenPlaybackStarts = false
     private static let maxPreBufferSize: UInt64 = 100 * 1024 * 1024
     
     // MARK: - Audio Effects Nodes
@@ -182,6 +183,7 @@ public class PAudioPlayer: NSObject {
         currentURL = url
         let entryId = AudioEntryId(id: url.lastPathComponent)
         currentEntryId = entryId
+        pauseWhenPlaybackStarts = startPaused
         
         let shouldPreBuffer = Self.shouldPreBuffer(url: url)
         
@@ -198,13 +200,14 @@ public class PAudioPlayer: NSObject {
                     try self.sfbPlayer.play(decoder)
                     
                     DispatchQueue.main.async {
-                        if startPaused {
-                            self.sfbPlayer.pause()
-                            self.state = .paused
-                        } else {
+                        if !startPaused {
                             self.state = .playing
                         }
-                        Logger.info("Started playing (pre-buffered): \(url.lastPathComponent)")
+                        Logger.info(
+                            startPaused
+                                ? "Prepared playback (pre-buffered): \(url.lastPathComponent)"
+                                : "Started playing (pre-buffered): \(url.lastPathComponent)"
+                        )
                     }
                 } catch {
                     Logger.warning("Pre-buffering failed, falling back to direct playback: \(error.localizedDescription)")
@@ -213,13 +216,14 @@ public class PAudioPlayer: NSObject {
                         try self.sfbPlayer.play(url)
                         
                         DispatchQueue.main.async {
-                            if startPaused {
-                                self.sfbPlayer.pause()
-                                self.state = .paused
-                            } else {
+                            if !startPaused {
                                 self.state = .playing
                             }
-                            Logger.info("Started playing (direct fallback): \(url.lastPathComponent)")
+                            Logger.info(
+                                startPaused
+                                    ? "Prepared playback (direct fallback): \(url.lastPathComponent)"
+                                    : "Started playing (direct fallback): \(url.lastPathComponent)"
+                            )
                         }
                     } catch {
                         DispatchQueue.main.async {
@@ -233,13 +237,16 @@ public class PAudioPlayer: NSObject {
                 try sfbPlayer.play(url)
                 
                 if startPaused {
-                    sfbPlayer.pause()
-                    state = .paused
+                    state = .ready
                 } else {
                     state = .playing
                 }
                 
-                Logger.info("Started playing: \(url.lastPathComponent)")
+                Logger.info(
+                    startPaused
+                        ? "Prepared playback: \(url.lastPathComponent)"
+                        : "Started playing: \(url.lastPathComponent)"
+                )
             } catch {
                 handlePlaybackError(error, entryId: entryId)
             }
@@ -249,6 +256,7 @@ public class PAudioPlayer: NSObject {
     /// Pause playback
     public func pause() {
         guard state == .playing else { return }
+        pauseWhenPlaybackStarts = false
         sfbPlayer.pause()
         state = .paused
         Logger.info("Playback paused")
@@ -257,6 +265,7 @@ public class PAudioPlayer: NSObject {
     /// Resume playback
     public func resume() {
         guard state == .paused else { return }
+        pauseWhenPlaybackStarts = false
         
         do {
             try sfbPlayer.play()
@@ -271,6 +280,7 @@ public class PAudioPlayer: NSObject {
     /// Stop playback
     public func stop() {
         guard state != .stopped else { return }
+        pauseWhenPlaybackStarts = false
         
         let wasPlaying = state == .playing
         let currentProgress = currentPlaybackProgress
@@ -465,6 +475,14 @@ public class PAudioPlayer: NSObject {
             
             switch newState {
             case .playing:
+                if self.pauseWhenPlaybackStarts {
+                    self.pauseWhenPlaybackStarts = false
+                    self.sfbPlayer.pause()
+                    self.state = .paused
+                    Logger.info("Playback primed in paused state")
+                    return
+                }
+
                 if self.state != .playing {
                     self.state = .playing
                     if let entryId = self.currentEntryId {

@@ -1,5 +1,12 @@
 import SwiftUI
 
+private enum SourceActionAlert: String, Identifiable {
+    case delete
+    case rebuild
+
+    var id: String { rawValue }
+}
+
 struct SourcesTabView: View {
     @EnvironmentObject var libraryManager: LibraryManager
 
@@ -8,7 +15,8 @@ struct SourcesTabView: View {
     @State private var password = ""
     @State private var isSaving = false
     @State private var isDeleting = false
-    @State private var showDeleteConfirmation = false
+    @State private var isRebuilding = false
+    @State private var activeAlert: SourceActionAlert?
 
     var body: some View {
         HStack(spacing: 0) {
@@ -35,15 +43,31 @@ struct SourcesTabView: View {
                 prepareNewSource()
             }
         }
-        .alert("Delete Emby Source?", isPresented: $showDeleteConfirmation) {
-            Button("Cancel", role: .cancel) { }
-            Button("Delete", role: .destructive) {
-                Task {
-                    await deleteSelectedSource()
-                }
+        .alert(item: $activeAlert) { alert in
+            switch alert {
+            case .delete:
+                Alert(
+                    title: Text("Delete Emby Source?"),
+                    message: Text("This removes the source configuration, favorites cache, and all synced Emby tracks from Petrichor."),
+                    primaryButton: .destructive(Text("Delete")) {
+                        Task {
+                            await deleteSelectedSource()
+                        }
+                    },
+                    secondaryButton: .cancel()
+                )
+            case .rebuild:
+                Alert(
+                    title: Text("Rebuild Emby Index?"),
+                    message: Text("This forces a full resync for the selected Emby source and rebuilds Petrichor's local index for its tracks."),
+                    primaryButton: .default(Text("Rebuild")) {
+                        Task {
+                            await rebuildSelectedSourceIndex()
+                        }
+                    },
+                    secondaryButton: .cancel()
+                )
             }
-        } message: {
-            Text("This removes the source configuration, favorites cache, and all synced Emby tracks from Petrichor.")
         }
     }
 
@@ -75,7 +99,7 @@ struct SourcesTabView: View {
                 .buttonStyle(.borderedProminent)
 
                 Button(role: .destructive) {
-                    showDeleteConfirmation = selectedExistingSource != nil
+                    activeAlert = selectedExistingSource == nil ? nil : .delete
                 } label: {
                     Label("Delete", systemImage: "trash")
                 }
@@ -148,34 +172,54 @@ struct SourcesTabView: View {
                 }
 
                 Section("Actions") {
-                    HStack(spacing: 12) {
-                        Button(action: saveSource) {
-                            if isSaving {
-                                ProgressView()
-                                    .controlSize(.small)
-                            } else {
-                                Text(selectedExistingSource == nil ? "Add Source" : "Save Changes")
+                    VStack(alignment: .leading, spacing: 12) {
+                        HStack(spacing: 12) {
+                            Button(action: saveSource) {
+                                if isSaving {
+                                    ProgressView()
+                                        .controlSize(.small)
+                                } else {
+                                    Text(selectedExistingSource == nil ? "Add Source" : "Save Changes")
+                                }
                             }
-                        }
-                        .buttonStyle(.borderedProminent)
-                        .disabled(isSaving)
+                            .buttonStyle(.borderedProminent)
+                            .disabled(isSaving || isDeleting || isRebuilding)
 
-                        Button("Sync Library Now") {
-                            Task {
-                                await syncSelectedSource(forceFavoriteRefresh: false)
+                            Button("Sync Library Now") {
+                                Task {
+                                    await syncSelectedSource(forceFavoriteRefresh: false)
+                                }
                             }
-                        }
-                        .buttonStyle(.bordered)
-                        .disabled(selectedExistingSource == nil || isSaving)
+                            .buttonStyle(.bordered)
+                            .disabled(selectedExistingSource == nil || isSaving || isDeleting || isRebuilding)
 
-                        Button("Refresh Favorites Cache") {
-                            Task {
-                                guard let source = selectedExistingSource else { return }
-                                await libraryManager.refreshFavoriteCache(for: source)
+                            Button("Rebuild Index") {
+                                activeAlert = selectedExistingSource == nil ? nil : .rebuild
+                            }
+                            .buttonStyle(.bordered)
+                            .disabled(selectedExistingSource == nil || isSaving || isDeleting || isRebuilding)
+                        }
+
+                        HStack(spacing: 12) {
+                            Button("Refresh Favorites Cache") {
+                                Task {
+                                    guard let source = selectedExistingSource else { return }
+                                    await libraryManager.refreshFavoriteCache(for: source)
+                                }
+                            }
+                            .buttonStyle(.bordered)
+                            .disabled(selectedExistingSource == nil || !draft.syncFavorites || isSaving || isDeleting || isRebuilding)
+
+                            if isRebuilding {
+                                HStack(spacing: 8) {
+                                    ProgressView()
+                                        .controlSize(.small)
+                                    Text("Rebuilding index...")
+                                        .font(.system(size: 12))
+                                        .foregroundColor(.secondary)
+                                }
                             }
                         }
-                        .buttonStyle(.bordered)
-                        .disabled(selectedExistingSource == nil || !draft.syncFavorites || isSaving)
                     }
 
                     if let source = selectedExistingSource {
@@ -267,6 +311,20 @@ struct SourcesTabView: View {
     private func syncSelectedSource(forceFavoriteRefresh: Bool) async {
         guard let source = selectedExistingSource else { return }
         await libraryManager.syncEmbySource(source, forceFavoriteRefresh: forceFavoriteRefresh, showNotifications: true)
+    }
+
+    private func rebuildSelectedSourceIndex() async {
+        guard let source = selectedExistingSource else { return }
+
+        await MainActor.run {
+            isRebuilding = true
+        }
+
+        await libraryManager.rebuildEmbySourceIndex(for: source)
+
+        await MainActor.run {
+            isRebuilding = false
+        }
     }
 
     private func deleteSelectedSource() async {

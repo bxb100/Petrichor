@@ -10,6 +10,12 @@ import AVFoundation
 import Foundation
 
 class PlaybackManager: NSObject, ObservableObject {
+    private struct PendingStartupSeek {
+        let playbackURL: URL
+        let trackTitle: String
+        let position: Double
+    }
+
     let playbackProgressState = PlaybackProgressState()
     
     private var scrobbleManager: ScrobbleManager? {
@@ -61,6 +67,7 @@ class PlaybackManager: NSObject, ObservableObject {
     private var progressUpdateTimer: DispatchSourceTimer?
     private var stateSaveTimer: Timer?
     private var restoredPosition: Double = 0
+    private var pendingStartupSeek: PendingStartupSeek?
     
     // MARK: - Dependencies
     
@@ -216,6 +223,7 @@ class PlaybackManager: NSObject, ObservableObject {
     }
     
     func stop() {
+        pendingStartupSeek = nil
         audioPlayer.stop()
         currentTrack = nil
         currentFullTrack = nil
@@ -227,6 +235,7 @@ class PlaybackManager: NSObject, ObservableObject {
     }
     
     func stopGracefully() {
+        pendingStartupSeek = nil
         audioPlayer.stop()
         currentTrack = nil
         currentFullTrack = nil
@@ -347,6 +356,7 @@ class PlaybackManager: NSObject, ObservableObject {
     // MARK: - Private Methods
     
     private func startPlayback(of fullTrack: FullTrack, lightweightTrack: Track) {
+        pendingStartupSeek = nil
         currentTrack = lightweightTrack
         currentFullTrack = fullTrack
         
@@ -390,21 +400,15 @@ class PlaybackManager: NSObject, ObservableObject {
         seekToPosition: Double
     ) {
         if seekToPosition > 0 {
+            pendingStartupSeek = PendingStartupSeek(
+                playbackURL: playbackURL,
+                trackTitle: lightweightTrack.title,
+                position: seekToPosition
+            )
             audioPlayer.play(url: playbackURL, startPaused: true)
             currentTime = seekToPosition
-
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
-                guard let self = self else { return }
-                if self.audioPlayer.seek(to: seekToPosition) {
-                    self.audioPlayer.resume()
-                    Logger.info("Resumed playback: \(lightweightTrack.title) from \(seekToPosition)s")
-                } else {
-                    Logger.warning("Seek failed, starting from beginning")
-                    self.currentTime = 0
-                    self.audioPlayer.play(url: playbackURL, startPaused: false)
-                }
-            }
         } else {
+            pendingStartupSeek = nil
             currentTime = 0
             audioPlayer.play(url: playbackURL, startPaused: false)
             Logger.info("Started playback: \(lightweightTrack.title)")
@@ -419,6 +423,25 @@ class PlaybackManager: NSObject, ObservableObject {
                 in: playlistManager.currentQueue,
                 around: playlistManager.currentQueueIndex
             )
+        }
+    }
+
+    private func performPendingStartupSeekIfNeeded() {
+        guard audioPlayer.state == .paused,
+              let pendingStartupSeek else {
+            return
+        }
+
+        self.pendingStartupSeek = nil
+
+        if audioPlayer.seek(to: pendingStartupSeek.position) {
+            currentTime = pendingStartupSeek.position
+            audioPlayer.resume()
+            Logger.info("Resumed playback: \(pendingStartupSeek.trackTitle) from \(pendingStartupSeek.position)s")
+        } else {
+            Logger.warning("Seek failed, starting from beginning")
+            currentTime = 0
+            audioPlayer.play(url: pendingStartupSeek.playbackURL, startPaused: false)
         }
     }
     
@@ -528,6 +551,10 @@ extension PlaybackManager: AudioPlayerDelegate {
             case .ready:
                 break
             }
+
+            if newState == .paused {
+                self.performPendingStartupSeekIfNeeded()
+            }
             
             if oldIsPlaying != self.isPlaying {
                 self.updateNowPlayingInfo()
@@ -544,6 +571,7 @@ extension PlaybackManager: AudioPlayerDelegate {
         duration: Double
     ) {
         DispatchQueue.main.async {
+            self.pendingStartupSeek = nil
             guard let currentTrack = self.currentTrack else {
                 Logger.info("Ignoring finish - no current track")
                 return
@@ -590,6 +618,7 @@ extension PlaybackManager: AudioPlayerDelegate {
     
     func audioPlayerUnexpectedError(player: PAudioPlayer, error: AudioPlayerError) {
         DispatchQueue.main.async {
+            self.pendingStartupSeek = nil
             Logger.error("Audio player error: \(error.localizedDescription)")
             NotificationManager.shared.addMessage(.error, "Playback error: \(error.localizedDescription)")
         }

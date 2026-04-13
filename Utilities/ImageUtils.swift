@@ -5,6 +5,11 @@ import SwiftUI
 import UniformTypeIdentifiers
 
 enum ImageUtils {
+    private static let renderBitmapInfo =
+        CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue
+    private static let opaqueBitmapInfo =
+        CGImageAlphaInfo.noneSkipFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue
+
     /// Compress image data to HEIC format, downscaling to fit within maxDimension while preserving aspect ratio.
     /// Never upscales images smaller than maxDimension.
     /// - Parameters:
@@ -20,6 +25,7 @@ enum ImageUtils {
         source: String? = nil
     ) -> Data? {
         guard let cgImage = decodedCGImage(from: imageData, source: source) else { return nil }
+        let preservesAlpha = hasAlphaChannel(cgImage)
 
         let srcWidth = CGFloat(cgImage.width)
         let srcHeight = CGFloat(cgImage.height)
@@ -42,7 +48,7 @@ enum ImageUtils {
             bitsPerComponent: 8,
             bytesPerRow: 0,
             space: CGColorSpaceCreateDeviceRGB(),
-            bitmapInfo: CGImageAlphaInfo.noneSkipFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue
+            bitmapInfo: renderBitmapInfo
         ) else {
             return resizeImage(from: imageData, to: targetSize)
         }
@@ -52,7 +58,7 @@ enum ImageUtils {
             return resizeImage(from: imageData, to: targetSize)
         }
 
-        if let heicData = encodeHEIC(finalCGImage, quality: quality) {
+        if let heicData = encodeHEIC(finalCGImage, quality: quality, preservesAlpha: preservesAlpha) {
             return heicData
         }
 
@@ -69,7 +75,11 @@ enum ImageUtils {
     }
 
     /// Encode a CGImage as HEIC data.
-    static func encodeHEIC(_ cgImage: CGImage, quality: CGFloat = 0.8) -> Data? {
+    static func encodeHEIC(
+        _ cgImage: CGImage,
+        quality: CGFloat = 0.8,
+        preservesAlpha: Bool = true
+    ) -> Data? {
         let data = NSMutableData()
         guard let destination = CGImageDestinationCreateWithData(
             data as CFMutableData,
@@ -77,7 +87,8 @@ enum ImageUtils {
             1,
             nil
         ) else { return nil }
-        CGImageDestinationAddImage(destination, cgImage, [
+        let encodedImage = imagePreparedForEncoding(cgImage, preservesAlpha: preservesAlpha)
+        CGImageDestinationAddImage(destination, encodedImage, [
             kCGImageDestinationLossyCompressionQuality: quality
         ] as CFDictionary)
         guard CGImageDestinationFinalize(destination) else {
@@ -95,6 +106,7 @@ enum ImageUtils {
     /// - Returns: Resized JPEG data, or nil if resizing fails
     static func resizeImage(from imageData: Data, to size: NSSize, compressionFactor: Float = 0.8) -> Data? {
         guard let cgImage = decodedCGImage(from: imageData) else { return nil }
+        let preservesAlpha = hasAlphaChannel(cgImage)
 
         let width = Int(size.width)
         let height = Int(size.height)
@@ -106,29 +118,129 @@ enum ImageUtils {
             bitsPerComponent: 8,
             bytesPerRow: 0,
             space: CGColorSpaceCreateDeviceRGB(),
-            bitmapInfo: CGImageAlphaInfo.noneSkipFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue
+            bitmapInfo: renderBitmapInfo
         ) else { return nil }
 
         context.interpolationQuality = .high
         context.draw(cgImage, in: CGRect(x: 0, y: 0, width: width, height: height))
 
         guard let resizedCG = context.makeImage() else { return nil }
-
-        let bitmapRep = NSBitmapImageRep(cgImage: resizedCG)
-        return bitmapRep.representation(using: .jpeg, properties: [.compressionFactor: compressionFactor])
+        return encodeJPEG(resizedCG, quality: CGFloat(compressionFactor), preservesAlpha: preservesAlpha)
     }
 
-    private static func decodedCGImage(from imageData: Data, source: String? = nil) -> CGImage? {
-        guard let imageSource = CGImageSourceCreateWithData(imageData as CFData, nil),
-              let cgImage = CGImageSourceCreateImageAtIndex(imageSource, 0, [
-                kCGImageSourceShouldCacheImmediately: true
-              ] as CFDictionary) else {
+    static func decodedCGImage(from imageData: Data, source: String? = nil) -> CGImage? {
+        if let nsImage = NSImage(data: imageData),
+           let cgImage = nsImage.cgImage(forProposedRect: nil, context: nil, hints: nil) {
+            return normalizedCGImageIfNeeded(cgImage)
+        }
+
+        guard let imageSource = CGImageSourceCreateWithData(
+            imageData as CFData,
+            [kCGImageSourceShouldCache: false] as CFDictionary
+        ),
+        let cgImage = CGImageSourceCreateImageAtIndex(imageSource, 0, [
+            kCGImageSourceShouldCacheImmediately: false
+        ] as CFDictionary) else {
             let context = source.map { " from \($0)" } ?? ""
             Logger.warning("Failed to decode image\(context) (\(imageData.count) bytes)")
             return nil
         }
 
-        return cgImage
+        return normalizedCGImageIfNeeded(cgImage)
+    }
+
+    private static func normalizedCGImageIfNeeded(_ cgImage: CGImage) -> CGImage {
+        let alphaInfo = CGImageAlphaInfo(
+            rawValue: cgImage.bitmapInfo.rawValue & CGBitmapInfo.alphaInfoMask.rawValue
+        ) ?? .none
+        let hasCompatibleLayout =
+            cgImage.bitsPerComponent == 8 &&
+            cgImage.bitsPerPixel == 32 &&
+            cgImage.colorSpace?.model == .rgb &&
+            [
+                CGImageAlphaInfo.premultipliedFirst,
+                .premultipliedLast,
+                .first,
+                .last,
+                .noneSkipFirst,
+                .noneSkipLast
+            ].contains(alphaInfo)
+
+        guard !hasCompatibleLayout else { return cgImage }
+
+        guard let context = CGContext(
+            data: nil,
+            width: cgImage.width,
+            height: cgImage.height,
+            bitsPerComponent: 8,
+            bytesPerRow: 0,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: renderBitmapInfo
+        ) else {
+            return cgImage
+        }
+
+        context.interpolationQuality = .high
+        context.draw(cgImage, in: CGRect(x: 0, y: 0, width: cgImage.width, height: cgImage.height))
+        return context.makeImage() ?? cgImage
+    }
+
+    private static func encodeJPEG(
+        _ cgImage: CGImage,
+        quality: CGFloat,
+        preservesAlpha: Bool
+    ) -> Data? {
+        let data = NSMutableData()
+        guard let destination = CGImageDestinationCreateWithData(
+            data as CFMutableData,
+            UTType.jpeg.identifier as CFString,
+            1,
+            nil
+        ) else { return nil }
+        let encodedImage = imagePreparedForEncoding(cgImage, preservesAlpha: preservesAlpha)
+        CGImageDestinationAddImage(destination, encodedImage, [
+            kCGImageDestinationLossyCompressionQuality: quality
+        ] as CFDictionary)
+        guard CGImageDestinationFinalize(destination) else {
+            Logger.warning("Failed to encode image as JPEG")
+            return nil
+        }
+        return data as Data
+    }
+
+    private static func imagePreparedForEncoding(_ cgImage: CGImage, preservesAlpha: Bool) -> CGImage {
+        guard !preservesAlpha else { return cgImage }
+
+        guard let context = CGContext(
+            data: nil,
+            width: cgImage.width,
+            height: cgImage.height,
+            bitsPerComponent: 8,
+            bytesPerRow: 0,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: opaqueBitmapInfo
+        ) else {
+            return cgImage
+        }
+
+        context.interpolationQuality = .high
+        context.draw(cgImage, in: CGRect(x: 0, y: 0, width: cgImage.width, height: cgImage.height))
+        return context.makeImage() ?? cgImage
+    }
+
+    private static func hasAlphaChannel(_ cgImage: CGImage) -> Bool {
+        let alphaInfo = CGImageAlphaInfo(
+            rawValue: cgImage.bitmapInfo.rawValue & CGBitmapInfo.alphaInfoMask.rawValue
+        ) ?? cgImage.alphaInfo
+
+        switch alphaInfo {
+        case .premultipliedFirst, .premultipliedLast, .first, .last:
+            return true
+        case .alphaOnly:
+            return true
+        default:
+            return false
+        }
     }
     
     /// Extract dominant colors from image data using grid-based sampling with diversity selection.

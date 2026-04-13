@@ -16,7 +16,6 @@ class LibraryManager: ObservableObject {
     @Published var isScanning: Bool = false
     @Published var isInitialOnboardingScan: Bool = false
     @Published var hasReachedInitialScanThreshold: Bool = false
-    @Published var scanStatusMessage: String = ""
     @Published var globalSearchText: String = "" {
         didSet {
             updateSearchResults()
@@ -112,10 +111,6 @@ class LibraryManager: ObservableObject {
         databaseManager.$isScanning
             .receive(on: DispatchQueue.main)
             .assign(to: &$isScanning)
-
-        databaseManager.$scanStatusMessage
-            .receive(on: DispatchQueue.main)
-            .assign(to: &$scanStatusMessage)
 
         loadDataSources()
         loadMusicLibrary()

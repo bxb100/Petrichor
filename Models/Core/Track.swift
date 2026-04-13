@@ -419,23 +419,49 @@ extension Track {
     /// - Parameter db: Database connection
     /// - Returns: FullTrack with all metadata, or nil if not found
     func fullTrack(db: Database) throws -> FullTrack? {
-        guard let trackId = trackId else { return nil }
-        
-        return try FullTrack
+        if let trackId,
+           let fullTrack = try FullTrack
             .filter(FullTrack.Columns.trackId == trackId)
-            .fetchOne(db)
+            .fetchOne(db) {
+            return fullTrack
+        }
+
+        return try resolveFullTrackByStableIdentity(db: db)
     }
     
     /// Async version for fetching FullTrack
     /// - Parameter dbQueue: Database queue
     /// - Returns: FullTrack with all metadata, or nil if not found
     func fullTrack(using dbQueue: DatabaseQueue) async throws -> FullTrack? {
-        guard let trackId = trackId else { return nil }
-
         return try await dbQueue.read { db in
-            try FullTrack
-                .filter(FullTrack.Columns.trackId == trackId)
-                .fetchOne(db)
+            try fullTrack(db: db)
         }
+    }
+
+    private func resolveFullTrackByStableIdentity(db: Database) throws -> FullTrack? {
+        let locator = resourceLocator
+
+        if let fullTrack = try FullTrack
+            .filter(FullTrack.Columns.path == locator)
+            .fetchOne(db) {
+            return fullTrack
+        }
+
+        if url.isFileURL,
+           let fullTrack = try FullTrack
+            .filter(FullTrack.Columns.path.collating(.nocase) == locator)
+            .fetchOne(db) {
+            return fullTrack
+        }
+
+        let resolvedSourceId = sourceId ?? TrackLocator.embyIdentifiers(from: url)?.sourceId
+        let resolvedRemoteItemId = remoteItemId ?? TrackLocator.embyIdentifiers(from: url)?.itemId
+
+        guard let resolvedSourceId, let resolvedRemoteItemId else { return nil }
+
+        return try FullTrack
+            .filter(FullTrack.Columns.sourceId == resolvedSourceId)
+            .filter(FullTrack.Columns.remoteItemId == resolvedRemoteItemId)
+            .fetchOne(db)
     }
 }

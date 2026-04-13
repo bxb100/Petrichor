@@ -164,6 +164,24 @@ extension LibraryManager {
         }
     }
 
+    func rebuildEmbySourceIndex(for source: LibraryDataSource) async {
+        await MainActor.run {
+            NotificationManager.shared.startActivity("Rebuilding Emby index for '\(source.name)'...")
+        }
+
+        await syncEmbySource(
+            source,
+            forceFavoriteRefresh: true,
+            showNotifications: true
+        )
+
+        await MainActor.run {
+            if NotificationManager.shared.activityMessage == "Rebuilding Emby index for '\(source.name)'..." {
+                NotificationManager.shared.stopActivity()
+            }
+        }
+    }
+
     func playbackURL(for track: Track) async throws -> URL {
         guard track.sourceKind == .emby else {
             return track.url

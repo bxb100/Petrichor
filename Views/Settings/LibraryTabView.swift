@@ -8,7 +8,6 @@ struct LibraryTabView: View {
     @State private var isSelectMode: Bool = false
     @State private var foldersToRemove: [Folder] = []
     @State private var stableScanningState = false
-    @State private var stableRefreshButtonState = false
     @State private var scanningStateTimer: Timer?
     @State private var alsoResetPreferences = false
     @State private var isCommandKeyPressed = false
@@ -49,7 +48,6 @@ struct LibraryTabView: View {
         }
         .onChange(of: libraryManager.isScanning) { _, newValue in
             updateStableScanningState(newValue)
-            updateStableRefreshState(newValue)
         }
         .alert(
             foldersToRemove.count == 1 ? "Remove Folder" : "Remove Folders",
@@ -211,9 +209,8 @@ struct LibraryTabView: View {
                         Text("Refreshing Library")
                             .font(.system(size: 14, weight: .semibold))
                             .foregroundColor(.primary)
-                        
-                        Text(libraryManager.scanStatusMessage.isEmpty ?
-                             "Refreshing Library..." : libraryManager.scanStatusMessage)
+
+                        Text(refreshStatusText)
                             .font(.system(size: 12))
                             .foregroundColor(.secondary)
                             .multilineTextAlignment(.center)
@@ -315,15 +312,10 @@ struct LibraryTabView: View {
             }
         }
     }
-    
-    private func updateStableRefreshState(_ isDisabled: Bool) {
-        if isDisabled {
-            stableRefreshButtonState = true
-        } else {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-                stableRefreshButtonState = false
-            }
-        }
+
+    private var refreshStatusText: String {
+        let status = notificationManager.currentActivityStatus.trimmingCharacters(in: .whitespacesAndNewlines)
+        return status.isEmpty ? "Refreshing Library..." : status
     }
 
     private func toggleSelectMode() {

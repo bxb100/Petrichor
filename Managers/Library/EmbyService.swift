@@ -1,5 +1,54 @@
 import Foundation
 
+private final class EmbyDateDecoder: @unchecked Sendable {
+    private let isoWithFractionalSeconds: ISO8601DateFormatter
+    private let isoWithoutFractionalSeconds: ISO8601DateFormatter
+    private let extendedISOFormatter: DateFormatter
+    private let plainISOFormatter: DateFormatter
+    private let lock = NSLock()
+
+    init() {
+        let isoWithFractionalSeconds = ISO8601DateFormatter()
+        isoWithFractionalSeconds.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        self.isoWithFractionalSeconds = isoWithFractionalSeconds
+
+        let isoWithoutFractionalSeconds = ISO8601DateFormatter()
+        isoWithoutFractionalSeconds.formatOptions = [.withInternetDateTime]
+        self.isoWithoutFractionalSeconds = isoWithoutFractionalSeconds
+
+        let extendedISOFormatter = DateFormatter()
+        extendedISOFormatter.locale = Locale(identifier: "en_US_POSIX")
+        extendedISOFormatter.timeZone = TimeZone(secondsFromGMT: 0)
+        extendedISOFormatter.dateFormat = "yyyy-MM-dd'T'HH:mm:ss.SSSSSSSZZZZZ"
+        self.extendedISOFormatter = extendedISOFormatter
+
+        let plainISOFormatter = DateFormatter()
+        plainISOFormatter.locale = Locale(identifier: "en_US_POSIX")
+        plainISOFormatter.timeZone = TimeZone(secondsFromGMT: 0)
+        plainISOFormatter.dateFormat = "yyyy-MM-dd'T'HH:mm:ssZZZZZ"
+        self.plainISOFormatter = plainISOFormatter
+    }
+
+    func decode(_ string: String) -> Date? {
+        lock.lock()
+        defer { lock.unlock() }
+
+        if let date = isoWithFractionalSeconds.date(from: string) {
+            return date
+        }
+
+        if let date = isoWithoutFractionalSeconds.date(from: string) {
+            return date
+        }
+
+        if let date = extendedISOFormatter.date(from: string) {
+            return date
+        }
+
+        return plainISOFormatter.date(from: string)
+    }
+}
+
 struct EmbySession: Codable {
     let accessToken: String
     let userId: String
@@ -211,6 +260,7 @@ actor EmbyService {
     private let session: URLSession
     private let decoder: JSONDecoder
     private let encoder: JSONEncoder
+    private let dateDecoder: EmbyDateDecoder
     private let clientName = "Petrichor"
     private let deviceName = "macOS"
     private let deviceIdKey = "embyDeviceIdentifier"
@@ -220,12 +270,14 @@ actor EmbyService {
         config.timeoutIntervalForRequest = 30
         config.timeoutIntervalForResource = 60
         self.session = URLSession(configuration: config)
+        let dateDecoder = EmbyDateDecoder()
+        self.dateDecoder = dateDecoder
 
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .custom { decoder in
             let container = try decoder.singleValueContainer()
             let dateString = try container.decode(String.self)
-            if let date = EmbyService.decodeDate(dateString) {
+            if let date = dateDecoder.decode(dateString) {
                 return date
             }
             throw DecodingError.dataCorruptedError(in: container, debugDescription: "Invalid Emby date: \(dateString)")
@@ -605,28 +657,4 @@ actor EmbyService {
         return newValue
     }
 
-    private static func decodeDate(_ string: String) -> Date? {
-        let isoFormatter = ISO8601DateFormatter()
-        isoFormatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        if let date = isoFormatter.date(from: string) {
-            return date
-        }
-
-        let plainISOFormatter = ISO8601DateFormatter()
-        plainISOFormatter.formatOptions = [.withInternetDateTime]
-        if let date = plainISOFormatter.date(from: string) {
-            return date
-        }
-
-        let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.timeZone = TimeZone(secondsFromGMT: 0)
-        formatter.dateFormat = "yyyy-MM-dd'T'HH:mm:ss.SSSSSSSZZZZZ"
-        if let date = formatter.date(from: string) {
-            return date
-        }
-
-        formatter.dateFormat = "yyyy-MM-dd'T'HH:mm:ssZZZZZ"
-        return formatter.date(from: string)
-    }
 }

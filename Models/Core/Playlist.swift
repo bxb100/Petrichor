@@ -335,7 +335,7 @@ struct Playlist: Identifiable, FetchableRecord, PersistableRecord {
             bitsPerComponent: 8,
             bytesPerRow: 0,
             space: CGColorSpaceCreateDeviceRGB(),
-            bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue
+            bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue
         ) else {
             Logger.warning("Failed to create CGContext for collage")
             return nil
@@ -348,8 +348,7 @@ struct Playlist: Identifiable, FetchableRecord, PersistableRecord {
 
         if count == 1 {
             if let data = collageTracks[0].artworkData,
-               let source = CGImageSourceCreateWithData(data as CFData, nil),
-               let cgImage = CGImageSourceCreateImageAtIndex(source, 0, nil) {
+               let cgImage = ImageUtils.decodedCGImage(from: data, source: "PlaylistCollage") {
                 context.draw(cgImage, in: CGRect(x: 0, y: 0, width: size, height: size))
             }
         } else {
@@ -358,8 +357,7 @@ struct Playlist: Identifiable, FetchableRecord, PersistableRecord {
                 let trackIndex = count == 2 ? (index == 0 || index == 3 ? 0 : 1) : index % count
 
                 guard let data = collageTracks[trackIndex].artworkData,
-                      let source = CGImageSourceCreateWithData(data as CFData, nil),
-                      let cgImage = CGImageSourceCreateImageAtIndex(source, 0, nil) else { continue }
+                      let cgImage = ImageUtils.decodedCGImage(from: data, source: "PlaylistCollage") else { continue }
 
                 context.draw(cgImage, in: CGRect(
                     x: CGFloat(col) * size / 2,

@@ -311,7 +311,7 @@ private extension DatabaseMigrator {
             t.column("play_count", .integer).notNull().defaults(to: 0)
             t.column("last_played_date", .datetime)
             t.column("is_duplicate", .boolean).notNull().defaults(to: false)
-            t.column("primary_track_id", .integer).references("tracks", column: "id", onDelete: .setNull)
+            t.column("primary_track_id", .integer).references("tracks_rebuild", column: "id", onDelete: .setNull)
             t.column("duplicate_group_id", .text)
             t.column("album_artist", .text)
             t.column("track_number", .integer)

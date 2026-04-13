@@ -2,6 +2,7 @@ import SwiftUI
 
 struct NoMusicEmptyStateView: View {
     @EnvironmentObject var libraryManager: LibraryManager
+    @StateObject private var notificationManager = NotificationManager.shared
     @State private var stableScanningState = false
     @State private var scanningStateTimer: Timer?
     @State private var showFormatsPopover = false
@@ -228,7 +229,7 @@ struct NoMusicEmptyStateView: View {
                     .font(.title2)
                     .fontWeight(.semibold)
 
-                Text(libraryManager.scanStatusMessage.isEmpty ? "Discovering your music..." : libraryManager.scanStatusMessage)
+                Text(scanningStatusText)
                     .font(.subheadline)
                     .foregroundColor(.secondary)
                     .lineLimit(2)
@@ -260,6 +261,11 @@ struct NoMusicEmptyStateView: View {
             )
         }
     }
+
+    private var scanningStatusText: String {
+        let status = notificationManager.currentActivityStatus.trimmingCharacters(in: .whitespacesAndNewlines)
+        return status.isEmpty ? "Discovering your music..." : status
+    }
 }
 
 // MARK: - Preview
@@ -281,7 +287,6 @@ struct NoMusicEmptyStateView: View {
         .environmentObject({
             let manager = LibraryManager()
             manager.isScanning = true
-            manager.scanStatusMessage = "Processing My Music Collection..."
             return manager
         }())
         .frame(width: 800, height: 600)
