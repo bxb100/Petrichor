@@ -38,8 +38,8 @@ extension DatabaseManager {
                     .select(Album.Columns.artworkData)
                     .filter(Album.Columns.id == albumId)
                     .fetchOne(db)?[Album.Columns.artworkData] as Data?
-            }) {
-                track.albumArtworkData = artworkData
+            }), let validatedArtwork = ImageUtils.validatedImageData(from: artworkData, source: "db/albums/\(albumId)") {
+                track.albumArtworkData = validatedArtwork
             }
         } catch {
             Logger.error("Failed to populate album artwork for full track: \(error)")
@@ -568,6 +568,7 @@ extension DatabaseManager {
             return try await dbQueue.read { db in
                 let lowercasedFilenames = filenames.map { $0.lowercased() }
                 let tracks = try Track
+                    .filter(Track.Columns.sourceKind == LibrarySourceKind.local.rawValue)
                     .filter(lowercasedFilenames.contains(Track.Columns.filename.lowercased))
                     .fetchAll(db)
                 var result: [String: Track] = [:]
@@ -595,6 +596,7 @@ extension DatabaseManager {
         do {
             return try dbQueue.read { db in
                 let paths = try applyDuplicateFilter(Track.all())
+                    .filter(Track.Columns.sourceKind == LibrarySourceKind.local.rawValue)
                     .select(Track.Columns.path)
                     .asRequest(of: String.self)
                     .fetchAll(db)
@@ -637,8 +639,9 @@ extension DatabaseManager {
         
         let artworkMap: [Int64: Data] = rows.reduce(into: [:]) { dict, row in
             if let id: Int64 = row["id"],
-               let artwork: Data = row["artwork_data"] {
-                dict[id] = artwork
+               let artwork: Data = row["artwork_data"],
+               let validatedArtwork = ImageUtils.validatedImageData(from: artwork, source: "db/albums/\(id)") {
+                dict[id] = validatedArtwork
             }
         }
         
@@ -666,8 +669,9 @@ extension DatabaseManager {
         
         let artworkMap: [Int64: Data] = rows.reduce(into: [:]) { dict, row in
             if let id: Int64 = row["id"],
-               let artwork: Data = row["track_artwork_data"] {
-                dict[id] = artwork
+               let artwork: Data = row["track_artwork_data"],
+               let validatedArtwork = ImageUtils.validatedImageData(from: artwork, source: "db/tracks/\(id)") {
+                dict[id] = validatedArtwork
             }
         }
         

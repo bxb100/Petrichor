@@ -12,6 +12,7 @@ import AppKit
 class LibraryManager: ObservableObject {
     @Published var tracks: [Track] = []
     @Published var folders: [Folder] = []
+    @Published var dataSources: [LibraryDataSource] = []
     @Published var isScanning: Bool = false
     @Published var isInitialOnboardingScan: Bool = false
     @Published var hasReachedInitialScanThreshold: Bool = false
@@ -49,7 +50,7 @@ class LibraryManager: ObservableObject {
     }
     
     var shouldShowMainUI: Bool {
-        guard !folders.isEmpty else { return false }
+        guard hasConfiguredSources else { return false }
         
         // If we're in initial onboarding scan, only show UI after threshold is reached
         if isInitialOnboardingScan {
@@ -57,6 +58,10 @@ class LibraryManager: ObservableObject {
         }
         
         return true
+    }
+
+    var hasConfiguredSources: Bool {
+        !folders.isEmpty || !dataSources.isEmpty
     }
 
     // MARK: - Private/Internal Properties
@@ -71,6 +76,12 @@ class LibraryManager: ObservableObject {
     internal let fileManager = FileManager.default
     internal var folderTrackCounts: [Int64: Int] = [:]
     private var pendingLibraryReload: DispatchWorkItem?
+    internal let embyService = EmbyService()
+    internal let iTunesArtworkService = ITunesArtworkService()
+    internal let embyPlaybackCacheManager = EmbyPlaybackCacheManager()
+    var embyEnrichmentTasks: [UUID: Task<Void, Never>] = [:]
+    var embyEnrichmentRunTokens: [UUID: UUID] = [:]
+    var embyEnrichmentProgress: [UUID: (sourceName: String, current: Int, total: Int)] = [:]
 
     // Database manager
     let databaseManager: DatabaseManager
@@ -106,6 +117,7 @@ class LibraryManager: ObservableObject {
             .receive(on: DispatchQueue.main)
             .assign(to: &$scanStatusMessage)
 
+        loadDataSources()
         loadMusicLibrary()
         
         pinnedItems = databaseManager.getPinnedItemsSync()
@@ -123,6 +135,11 @@ class LibraryManager: ObservableObject {
             await databaseManager.runPendingBackgroundMigrations()
             await MainActor.run { refreshEntities() }
             ArtistBioManager.shared.fetchMissingArtistImages(using: self)
+        }
+
+        Task {
+            try? await Task.sleep(nanoseconds: TimeConstants.fiftyMilliseconds)
+            await syncRemoteSourcesOnLaunch()
         }
 
         // Observe auto-scan interval changes
@@ -164,6 +181,9 @@ class LibraryManager: ObservableObject {
     }
 
     deinit {
+        for task in embyEnrichmentTasks.values {
+            task.cancel()
+        }
         fileWatcherTimer?.invalidate()
         // Stop accessing all security scoped resources
         for folder in folders {
@@ -188,6 +208,7 @@ class LibraryManager: ObservableObject {
         pendingLibraryReload?.cancel()
         let workItem = DispatchWorkItem { [weak self] in
             guard let self = self else { return }
+            self.loadDataSources()
             self.refreshLibraryCategories()
             self.loadMusicLibrary()
             self.updateTotalCounts()

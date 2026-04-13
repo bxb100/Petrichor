@@ -43,8 +43,8 @@ struct NoMusicEmptyStateView: View {
             if libraryManager.isInitialOnboardingScan {
                 return !libraryManager.hasReachedInitialScanThreshold
             }
-            // For non-initial scans, show scanning state only if no folders exist
-            return libraryManager.folders.isEmpty
+            // For non-initial scans, show scanning state only if no sources are configured yet
+            return !libraryManager.hasConfiguredSources
         case .settings:
             // Settings always shows scanning state when scanning is active
             return true
@@ -57,8 +57,8 @@ struct NoMusicEmptyStateView: View {
                 // Show scanning animation during initial scan until threshold is reached
                 scanningProgressContent
                     .transition(.opacity)
-            } else if libraryManager.folders.isEmpty {
-                // Show empty state only when no folders exist
+            } else if !libraryManager.hasConfiguredSources {
+                // Show empty state only when no folders or remote sources exist
                 emptyStateContent
                     .transition(.opacity)
             } else {
@@ -114,7 +114,7 @@ struct NoMusicEmptyStateView: View {
                 .font(.headline)
                 .foregroundColor(.secondary)
 
-            Text("Your folders are being scanned for music files")
+            Text("Your library sources are being scanned for music files")
                 .font(.subheadline)
                 .foregroundColor(.secondary.opacity(0.8))
         }
@@ -140,35 +140,48 @@ struct NoMusicEmptyStateView: View {
                     .fontWeight(.semibold)
 
                 VStack(spacing: 8) {
-                    Text("Add folders containing your music to get started")
+                    Text("Add local folders or configure an Emby source to get started")
                         .font(.title3)
                         .foregroundColor(.secondary)
 
-                    Text("You can select multiple folders at once")
+                    Text("You can mix local folders with remote library sources")
                         .font(.subheadline)
                         .foregroundColor(.secondary.opacity(0.7))
                 }
                 .multilineTextAlignment(.center)
             }
 
-            // Add button
-            Button(action: { libraryManager.addFolder() }) {
-                HStack(spacing: 6) {
-                    Image(systemName: Icons.plusCircleFill)
-                        .font(.system(size: 16))
-                    Text("Add Music Folder")
-                        .font(.system(size: 14, weight: .medium))
+            HStack(spacing: 12) {
+                Button(action: { libraryManager.addFolder() }) {
+                    HStack(spacing: 6) {
+                        Image(systemName: Icons.plusCircleFill)
+                            .font(.system(size: 16))
+                        Text("Add Music Folder")
+                            .font(.system(size: 14, weight: .medium))
+                    }
+                    .foregroundColor(.white)
+                    .padding(.horizontal, 20)
+                    .padding(.vertical, 10)
+                    .background(
+                        RoundedRectangle(cornerRadius: 8)
+                            .fill(Color.accentColor)
+                            .shadow(color: Color.accentColor.opacity(0.3), radius: 6, x: 0, y: 3)
+                    )
                 }
-                .foregroundColor(.white)
-                .padding(.horizontal, 20)
-                .padding(.vertical, 10)
-                .background(
-                    RoundedRectangle(cornerRadius: 8)
-                        .fill(Color.accentColor)
-                        .shadow(color: Color.accentColor.opacity(0.3), radius: 6, x: 0, y: 3)
-                )
+                .buttonStyle(PlainButtonStyle())
+
+                Button(action: openSourcesSettings) {
+                    HStack(spacing: 6) {
+                        Image(systemName: "externaldrive.connected.to.line.below")
+                            .font(.system(size: 16))
+                        Text("Configure Emby")
+                            .font(.system(size: 14, weight: .medium))
+                    }
+                    .padding(.horizontal, 20)
+                    .padding(.vertical, 10)
+                }
+                .buttonStyle(.bordered)
             }
-            .buttonStyle(PlainButtonStyle())
 
             // Supported formats
             Button {
@@ -224,7 +237,7 @@ struct NoMusicEmptyStateView: View {
             }
 
             // Track count
-            if !libraryManager.folders.isEmpty {
+            if libraryManager.hasConfiguredSources {
                 Text("\(libraryManager.totalTrackCount) tracks found")
                     .font(.caption)
                     .foregroundColor(.secondary)
@@ -236,6 +249,16 @@ struct NoMusicEmptyStateView: View {
                 .italic()
         }
         .transition(.opacity)
+    }
+
+    private func openSourcesSettings() {
+        NotificationCenter.default.post(name: NSNotification.Name("OpenSettings"), object: nil)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+            NotificationCenter.default.post(
+                name: NSNotification.Name("SettingsSelectTab"),
+                object: SettingsView.SettingsTab.sources
+            )
+        }
     }
 }
 

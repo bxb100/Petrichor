@@ -1,5 +1,6 @@
 import AppKit
 import CoreImage
+import ImageIO
 import SwiftUI
 import UniformTypeIdentifiers
 
@@ -18,12 +19,7 @@ enum ImageUtils {
         quality: CGFloat = 0.8,
         source: String? = nil
     ) -> Data? {
-        guard let image = NSImage(data: imageData),
-              let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
-            let context = source.map { " from \($0)" } ?? ""
-            Logger.warning("Failed to create image\(context) (\(imageData.count) bytes)")
-            return nil
-        }
+        guard let cgImage = decodedCGImage(from: imageData, source: source) else { return nil }
 
         let srcWidth = CGFloat(cgImage.width)
         let srcHeight = CGFloat(cgImage.height)
@@ -66,6 +62,12 @@ enum ImageUtils {
         return resizeImage(from: imageData, to: targetSize)
     }
 
+    /// Validate that image data is decodable before storing or rendering it.
+    static func validatedImageData(from imageData: Data, source: String? = nil) -> Data? {
+        guard decodedCGImage(from: imageData, source: source) != nil else { return nil }
+        return imageData
+    }
+
     /// Encode a CGImage as HEIC data.
     static func encodeHEIC(_ cgImage: CGImage, quality: CGFloat = 0.8) -> Data? {
         let data = NSMutableData()
@@ -92,12 +94,7 @@ enum ImageUtils {
     ///   - compressionFactor: JPEG compression quality (0.0 to 1.0)
     /// - Returns: Resized JPEG data, or nil if resizing fails
     static func resizeImage(from imageData: Data, to size: NSSize, compressionFactor: Float = 0.8) -> Data? {
-        guard let imageSource = CGImageSourceCreateWithData(imageData as CFData, nil),
-              let cgImage = CGImageSourceCreateImageAtIndex(imageSource, 0, [
-                kCGImageSourceShouldCacheImmediately: true
-              ] as CFDictionary) else {
-            return nil
-        }
+        guard let cgImage = decodedCGImage(from: imageData) else { return nil }
 
         let width = Int(size.width)
         let height = Int(size.height)
@@ -119,6 +116,19 @@ enum ImageUtils {
 
         let bitmapRep = NSBitmapImageRep(cgImage: resizedCG)
         return bitmapRep.representation(using: .jpeg, properties: [.compressionFactor: compressionFactor])
+    }
+
+    private static func decodedCGImage(from imageData: Data, source: String? = nil) -> CGImage? {
+        guard let imageSource = CGImageSourceCreateWithData(imageData as CFData, nil),
+              let cgImage = CGImageSourceCreateImageAtIndex(imageSource, 0, [
+                kCGImageSourceShouldCacheImmediately: true
+              ] as CFDictionary) else {
+            let context = source.map { " from \($0)" } ?? ""
+            Logger.warning("Failed to decode image\(context) (\(imageData.count) bytes)")
+            return nil
+        }
+
+        return cgImage
     }
     
     /// Extract dominant colors from image data using grid-based sampling with diversity selection.

@@ -97,7 +97,12 @@ class Album: Identifiable, ObservableObject, FetchableRecord, PersistableRecord 
         title = row[Columns.title]
         normalizedTitle = row[Columns.normalizedTitle]
         sortTitle = row[Columns.sortTitle]
-        artworkData = row[Columns.artworkData]
+        if let rawArtwork: Data = row[Columns.artworkData] {
+            let artworkSource = "db/albums/\(id?.description ?? "unknown")"
+            artworkData = ImageUtils.validatedImageData(from: rawArtwork, source: artworkSource)
+        } else {
+            artworkData = nil
+        }
         releaseDate = row[Columns.releaseDate]
         releaseYear = row[Columns.releaseYear]
         albumType = row[Columns.albumType]

@@ -155,7 +155,7 @@ class PlaybackManager: NSObject, ObservableObject {
         restoredUITrack = nil
         restoredPosition = 0
         
-        guard FileManager.default.fileExists(atPath: track.url.path) else {
+        guard track.isRemote || FileManager.default.fileExists(atPath: track.url.path) else {
             Logger.warning("Track file does not exist: \(track.url.path)")
             NotificationManager.shared.addMessage(.error, "Cannot play '\(track.title)': File not found")
             
@@ -352,12 +352,47 @@ class PlaybackManager: NSObject, ObservableObject {
         
         let seekToPosition = restoredPosition
         restoredPosition = 0
-        
+
+        if fullTrack.isRemote {
+            Task {
+                do {
+                    let playbackURL = try await self.libraryManager.playbackURL(for: lightweightTrack)
+                    await MainActor.run {
+                        self.startResolvedPlayback(
+                            with: playbackURL,
+                            fullTrack: fullTrack,
+                            lightweightTrack: lightweightTrack,
+                            seekToPosition: seekToPosition
+                        )
+                    }
+                } catch {
+                    await MainActor.run {
+                        Logger.error("Failed to resolve remote playback URL: \(error)")
+                        NotificationManager.shared.addMessage(.error, "Failed to cache '\(lightweightTrack.title)' from Emby")
+                    }
+                }
+            }
+            return
+        }
+
+        startResolvedPlayback(
+            with: fullTrack.url,
+            fullTrack: fullTrack,
+            lightweightTrack: lightweightTrack,
+            seekToPosition: seekToPosition
+        )
+    }
+
+    private func startResolvedPlayback(
+        with playbackURL: URL,
+        fullTrack: FullTrack,
+        lightweightTrack: Track,
+        seekToPosition: Double
+    ) {
         if seekToPosition > 0 {
-            audioPlayer.play(url: fullTrack.url, startPaused: true)
+            audioPlayer.play(url: playbackURL, startPaused: true)
             currentTime = seekToPosition
-            
-            // Wait for decoder to be ready before resuming playback
+
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
                 guard let self = self else { return }
                 if self.audioPlayer.seek(to: seekToPosition) {
@@ -366,18 +401,25 @@ class PlaybackManager: NSObject, ObservableObject {
                 } else {
                     Logger.warning("Seek failed, starting from beginning")
                     self.currentTime = 0
-                    self.audioPlayer.play(url: fullTrack.url, startPaused: false)
+                    self.audioPlayer.play(url: playbackURL, startPaused: false)
                 }
             }
         } else {
             currentTime = 0
-            audioPlayer.play(url: fullTrack.url, startPaused: false)
+            audioPlayer.play(url: playbackURL, startPaused: false)
             Logger.info("Started playback: \(lightweightTrack.title)")
         }
-        
+
         startStateSaveTimer()
         updateNowPlayingInfo()
         scrobbleManager?.trackStarted(lightweightTrack)
+
+        Task {
+            await libraryManager.prefetchRemoteTracks(
+                in: playlistManager.currentQueue,
+                around: playlistManager.currentQueueIndex
+            )
+        }
     }
     
     private func startProgressUpdateTimer() {

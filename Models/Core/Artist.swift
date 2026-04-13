@@ -86,7 +86,12 @@ class Artist: Identifiable, ObservableObject, FetchableRecord, PersistableRecord
         name = row[Columns.name]
         normalizedName = row[Columns.normalizedName]
         sortName = row[Columns.sortName]
-        artworkData = row[Columns.artworkData]
+        if let rawArtwork: Data = row[Columns.artworkData] {
+            let artworkSource = "db/artists/\(id?.description ?? normalizedName)"
+            artworkData = ImageUtils.validatedImageData(from: rawArtwork, source: artworkSource)
+        } else {
+            artworkData = nil
+        }
         bio = row[Columns.bio]
         bioSource = row[Columns.bioSource]
         bioUpdatedAt = row[Columns.bioUpdatedAt]

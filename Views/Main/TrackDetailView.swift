@@ -516,8 +516,11 @@ private struct FileDetailsSection: View {
             items.append(("File Size", formatFileSize(fileSize)))
         }
 
-        // File path
-        items.append(("File Path", fullTrack.url.path))
+        if fullTrack.isRemote {
+            items.append(("Location", fullTrack.url.absoluteString))
+        } else {
+            items.append(("File Path", fullTrack.url.path))
+        }
 
         // Dates
         if let dateAdded = fullTrack.dateAdded {

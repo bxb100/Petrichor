@@ -80,6 +80,14 @@ class MetadataExtractor {
     ) async -> TrackMetadata {
         var metadata = TrackMetadata(url: url)
 
+        guard url.isFileURL else {
+            Logger.warning("Skipping metadata extraction for non-file URL: \(url.absoluteString)")
+            if let externalArtwork = externalArtwork {
+                metadata.artworkData = externalArtwork
+            }
+            return metadata
+        }
+
         // Try to create AudioFile
         guard
             let audioFile = try? AudioFile(
@@ -579,7 +587,9 @@ class MetadataExtractor {
             return
         }
 
-        let compressed = ImageUtils.compressImage(from: rawData, source: source) ?? rawData
+        let compressed = ImageUtils.compressImage(from: rawData, source: source)
+            ?? ImageUtils.validatedImageData(from: rawData, source: source)
+        guard let compressed else { return }
         metadata.artworkData = compressed
 
         // Store in cache for subsequent tracks with identical artwork

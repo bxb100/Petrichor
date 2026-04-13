@@ -12,7 +12,7 @@ struct PlaybackUIState: Codable {
 }
 
 struct PlaybackState: Codable {
-    static let currentVersion = 1
+    static let currentVersion = 2
     let version: Int
 
     // Track identification
@@ -52,16 +52,16 @@ struct PlaybackState: Codable {
         volume: Float,
         isMuted: Bool,
         shuffleEnabled: Bool,
-        repeatMode: RepeatMode
+        repeatMode: PlaybackRepeatMode
     ) {
         self.version = Self.currentVersion
-        self.currentTrackPath = currentTrack?.url.path
+        self.currentTrackPath = currentTrack?.resourceLocator
         self.currentTrackId = currentTrack?.trackId
         self.playbackPosition = playbackPosition
         self.trackDuration = currentTrack?.duration ?? 0
 
         self.queueVisible = queueVisible
-        self.queueTrackPaths = queue.map { $0.url.path }
+        self.queueTrackPaths = queue.map { $0.resourceLocator }
         self.queueTrackIds = queue.compactMap { $0.trackId }
         self.currentQueueIndex = currentQueueIndex
 
@@ -126,8 +126,8 @@ struct PlaybackState: Codable {
         self.appVersion = try container.decode(String.self, forKey: .appVersion)
     }
 
-    // Helper to convert back to RepeatMode enum
-    var repeatModeEnum: RepeatMode {
+    // Helper to convert back to PlaybackRepeatMode enum
+    var repeatModeEnum: PlaybackRepeatMode {
         switch repeatMode {
         case "one": return .one
         case "all": return .all

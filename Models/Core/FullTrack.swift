@@ -5,6 +5,10 @@ struct FullTrack: Identifiable, Equatable, Hashable, FetchableRecord, Persistabl
     let id = UUID()
     var trackId: Int64?
     let url: URL
+    var sourceId: String?
+    var sourceKind: LibrarySourceKind = .local
+    var remoteItemId: String?
+    var remoteEnrichmentState: RemoteTrackEnrichmentState = .completed
     
     // Core metadata
     var title: String
@@ -22,7 +26,7 @@ struct FullTrack: Identifiable, Equatable, Hashable, FetchableRecord, Persistabl
     var lastPlayedDate: Date?
     
     // File properties
-    let format: String
+    var format: String
     var folderId: Int64?
     
     // Additional metadata
@@ -73,6 +77,14 @@ struct FullTrack: Identifiable, Equatable, Hashable, FetchableRecord, Persistabl
         // Fall back to track's own artwork
         return trackArtworkData
     }
+
+    var resourceLocator: String {
+        TrackLocator.storageString(for: url)
+    }
+
+    var isRemote: Bool {
+        sourceKind != .local
+    }
     
     // MARK: - Initialization
     
@@ -108,6 +120,10 @@ struct FullTrack: Identifiable, Equatable, Hashable, FetchableRecord, Persistabl
         static let trackId = Column("id")
         static let folderId = Column("folder_id")
         static let path = Column("path")
+        static let sourceId = Column("source_id")
+        static let sourceKind = Column("source_kind")
+        static let remoteItemId = Column("remote_item_id")
+        static let remoteEnrichmentState = Column("remote_enrichment_state")
         static let filename = Column("filename")
         static let title = Column("title")
         static let artist = Column("artist")
@@ -157,12 +173,16 @@ struct FullTrack: Identifiable, Equatable, Hashable, FetchableRecord, Persistabl
     init(row: Row) throws {
         // Extract path and create URL
         let path: String = row[Columns.path]
-        self.url = URL(fileURLWithPath: path)
+        self.url = TrackLocator.url(from: path)
         self.format = row[Columns.format]
-        
+
         // Core properties
         trackId = row[Columns.trackId]
         folderId = row[Columns.folderId]
+        sourceId = row[Columns.sourceId]
+        sourceKind = LibrarySourceKind(rawValue: row[Columns.sourceKind]) ?? .local
+        remoteItemId = row[Columns.remoteItemId]
+        remoteEnrichmentState = RemoteTrackEnrichmentState(rawValue: row[Columns.remoteEnrichmentState]) ?? .completed
         title = row[Columns.title]
         artist = row[Columns.artist]
         album = row[Columns.album]
@@ -170,7 +190,12 @@ struct FullTrack: Identifiable, Equatable, Hashable, FetchableRecord, Persistabl
         genre = row[Columns.genre]
         year = row[Columns.year]
         duration = row[Columns.duration]
-        trackArtworkData = row[Columns.trackArtworkData]
+        if let rawArtwork: Data = row[Columns.trackArtworkData] {
+            let artworkSource = "db/tracks/\(trackId?.description ?? remoteItemId ?? url.lastPathComponent)"
+            trackArtworkData = ImageUtils.validatedImageData(from: rawArtwork, source: artworkSource)
+        } else {
+            trackArtworkData = nil
+        }
         dateAdded = row[Columns.dateAdded]
         isFavorite = row[Columns.isFavorite]
         playCount = row[Columns.playCount]
@@ -224,8 +249,12 @@ struct FullTrack: Identifiable, Equatable, Hashable, FetchableRecord, Persistabl
     func encode(to container: inout PersistenceContainer) throws {
         container[Columns.trackId] = trackId
         container[Columns.folderId] = folderId
-        container[Columns.path] = url.path
-        container[Columns.filename] = url.lastPathComponent
+        container[Columns.path] = resourceLocator
+        container[Columns.sourceId] = sourceId
+        container[Columns.sourceKind] = sourceKind.rawValue
+        container[Columns.remoteItemId] = remoteItemId
+        container[Columns.remoteEnrichmentState] = remoteEnrichmentState.rawValue
+        container[Columns.filename] = url.isFileURL ? url.lastPathComponent : (remoteItemId ?? url.lastPathComponent)
         container[Columns.title] = title
         container[Columns.artist] = artist
         container[Columns.album] = album

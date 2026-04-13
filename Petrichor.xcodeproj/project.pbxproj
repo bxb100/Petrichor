@@ -14,8 +14,8 @@
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
-		550F4A0E2DB45B1A005F794E /* Petrichor.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Petrichor.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		550F4A3F2DB4786F005F794E /* .gitignore */ = {isa = PBXFileReference; lastKnownFileType = text; path = .gitignore; sourceTree = "<group>"; };
+		55A1D0012F9A100000000001 /* Petrichor.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Petrichor.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		55593A412DE019E400640247 /* README.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = README.md; sourceTree = "<group>"; };
 		55613A822E04A7230000E217 /* .swiftlint.yml */ = {isa = PBXFileReference; lastKnownFileType = text.yaml; path = .swiftlint.yml; sourceTree = "<group>"; };
 		5590877E2DE0C078009E7719 /* PetrichorApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PetrichorApp.swift; sourceTree = "<group>"; };
@@ -110,6 +110,7 @@
 		550F4A052DB45B1A005F794E = {
 			isa = PBXGroup;
 			children = (
+				55A1D0022F9A100000000001 /* Products */,
 				559087A32DE0C09C009E7719 /* Application */,
 				559087AA2DE0C0A2009E7719 /* Managers */,
 				559087B72DE0C0A5009E7719 /* Models */,
@@ -124,8 +125,15 @@
 				55593A412DE019E400640247 /* README.md */,
 				55FB816B2EC22E6E008321CA /* ACKNOWLEDGEMENTS.md */,
 				5590877E2DE0C078009E7719 /* PetrichorApp.swift */,
-				550F4A0E2DB45B1A005F794E /* Petrichor.app */,
 			);
+			sourceTree = "<group>";
+		};
+		55A1D0022F9A100000000001 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				55A1D0012F9A100000000001 /* Petrichor.app */,
+			);
+			name = Products;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -160,7 +168,7 @@
 				552A583F2EC0629A00F6D8C0 /* SFBAudioEngine */,
 			);
 			productName = Petrichor;
-			productReference = 550F4A0E2DB45B1A005F794E /* Petrichor.app */;
+			productReference = 55A1D0012F9A100000000001 /* Petrichor.app */;
 			productType = "com.apple.product-type.application";
 		};
 /* End PBXNativeTarget section */
@@ -193,7 +201,7 @@
 				552A583E2EC0629A00F6D8C0 /* XCRemoteSwiftPackageReference "SFBAudioEngine" */,
 			);
 			preferredProjectObjectVersion = 77;
-			productRefGroup = 550F4A052DB45B1A005F794E;
+			productRefGroup = 55A1D0022F9A100000000001 /* Products */;
 			projectDirPath = "";
 			projectRoot = "";
 			targets = (
@@ -357,7 +365,7 @@
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 999;
 				DEAD_CODE_STRIPPING = YES;
-				DEVELOPMENT_TEAM = B53W6J5RWK;
+				DEVELOPMENT_TEAM = TTN3459F42;
 				ENABLE_APP_SANDBOX = YES;
 				ENABLE_HARDENED_RUNTIME = YES;
 				ENABLE_INCOMING_NETWORK_CONNECTIONS = NO;
@@ -405,7 +413,7 @@
 				CURRENT_PROJECT_VERSION = 142;
 				DEAD_CODE_STRIPPING = YES;
 				DEVELOPMENT_TEAM = "";
-				"DEVELOPMENT_TEAM[sdk=macosx*]" = B53W6J5RWK;
+				"DEVELOPMENT_TEAM[sdk=macosx*]" = TTN3459F42;
 				ENABLE_APP_SANDBOX = YES;
 				ENABLE_HARDENED_RUNTIME = YES;
 				ENABLE_INCOMING_NETWORK_CONNECTIONS = NO;

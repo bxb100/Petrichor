@@ -201,6 +201,7 @@ enum DatabaseConstants {
     static let walMode = "WAL"
     static let batchSize = 50
     static let largeBatchSize = 100
+    static let remoteArtworkDownloadConcurrency = 4
 }
 
 // MARK: - Default Playlists
@@ -275,7 +276,7 @@ extension Notification.Name {
 // MARK: - Icon Helpers
 
 extension Icons {
-    static func repeatIcon(for mode: RepeatMode) -> String {
+    static func repeatIcon(for mode: PlaybackRepeatMode) -> String {
         switch mode {
         case .off:
             return Icons.repeatFill

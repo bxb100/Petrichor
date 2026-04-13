@@ -10,6 +10,7 @@ struct SettingsView: View {
     enum SettingsTab: String, CaseIterable {
         case general = "General"
         case library = "Library"
+        case sources = "Sources"
         case online = "Online"
         case about = "About"
 
@@ -17,6 +18,7 @@ struct SettingsView: View {
             switch self {
             case .general: return Icons.settings
             case .library: return Icons.customMusicNoteRectangleStack
+            case .sources: return "externaldrive.connected.to.line.below"
             case .online: return Icons.globe
             case .about: return Icons.infoCircle
             }
@@ -26,6 +28,7 @@ struct SettingsView: View {
             switch self {
             case .general: return Icons.settings
             case .library: return Icons.customMusicNoteRectangleStack
+            case .sources: return "externaldrive.connected.to.line.below"
             case .online: return Icons.globeFill
             case .about: return Icons.infoCircleFill
             }
@@ -66,6 +69,8 @@ struct SettingsView: View {
                     GeneralTabView()
                 case .library:
                     LibraryTabView()
+                case .sources:
+                    SourcesTabView()
                 case .online:
                     OnlineTabView()
                 case .about:
@@ -74,7 +79,7 @@ struct SettingsView: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .frame(width: 600, height: 650)
+        .frame(width: 760, height: 650)
         .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("SettingsSelectTab"))) { notification in
             if let tab = notification.object as? SettingsTab {
                 selectedTab = tab
