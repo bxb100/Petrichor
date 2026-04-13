@@ -413,22 +413,27 @@ extension LibraryManager {
             let upperBound = min(index + maxConcurrentDownloads, items.count)
             let chunk = Array(items[index..<upperBound])
 
-            let downloadedPairs = try await withThrowingTaskGroup(of: (String, Data?).self) { group in
+            let downloadedPairs = await withTaskGroup(of: (String, Data?).self) { group in
                 for item in chunk {
                     guard let itemId = item.id else { continue }
                     group.addTask {
-                        let imageData = try await self.embyService.downloadPrimaryImageData(
-                            source: source,
-                            session: session,
-                            itemId: itemId,
-                            imageTag: item.primaryImageTag ?? item.imageTags?["Primary"]
-                        )
-                        return (itemId, imageData)
+                        do {
+                            let imageData = try await self.embyService.downloadPrimaryImageData(
+                                source: source,
+                                session: session,
+                                itemId: itemId,
+                                imageTag: item.primaryImageTag ?? item.imageTags?["Primary"]
+                            )
+                            return (itemId, imageData)
+                        } catch {
+                            Logger.warning("Failed to download Emby artwork for item \(itemId): \(error)")
+                            return (itemId, nil)
+                        }
                     }
                 }
 
                 var pairs: [(String, Data?)] = []
-                for try await pair in group {
+                for await pair in group {
                     pairs.append(pair)
                 }
                 return pairs
@@ -552,11 +557,6 @@ extension LibraryManager {
                     current: min(processedTracks, totalPendingTracks),
                     total: totalPendingTracks
                 )
-
-                await MainActor.run {
-                    self.scheduleLibraryReload()
-                    self.refreshDiscoverTracks()
-                }
             }
 
             if !Task.isCancelled {
