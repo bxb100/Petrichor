@@ -64,7 +64,7 @@ extension LibraryManager {
             await syncEmbySource(
                 mutableSource,
                 forceFavoriteRefresh: true,
-                showNotifications: false,
+                showNotifications: existingSource == nil || requiresFullSync,
                 fullSync: requiresFullSync
             )
             return true

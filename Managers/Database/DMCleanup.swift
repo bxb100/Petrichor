@@ -13,22 +13,6 @@ extension DatabaseManager {
         guard !trackIds.isEmpty else { return }
 
         for chunk in trackIds.chunked(into: 400) {
-            _ = try PlaylistTrack
-                .filter(chunk.contains(PlaylistTrack.Columns.trackId))
-                .deleteAll(db)
-
-            _ = try TrackArtist
-                .filter(chunk.contains(TrackArtist.Columns.trackId))
-                .deleteAll(db)
-
-            _ = try TrackGenre
-                .filter(chunk.contains(TrackGenre.Columns.trackId))
-                .deleteAll(db)
-
-            _ = try FullTrack
-                .filter(chunk.contains(FullTrack.Columns.primaryTrackId))
-                .updateAll(db, FullTrack.Columns.primaryTrackId.set(to: nil))
-
             _ = try FullTrack
                 .filter(chunk.contains(FullTrack.Columns.trackId))
                 .deleteAll(db)
@@ -42,47 +26,8 @@ extension DatabaseManager {
         try await dbQueue.write { db in
             var deletedCounts = [String: Int]()
             
-            // 1. Clean up broken references in tracks first.
-            try db.execute(
-                sql: """
-                DELETE FROM tracks
-                WHERE folder_id IS NOT NULL
-                  AND folder_id NOT IN (SELECT id FROM folders)
-                """
-            )
-            deletedCounts["tracks_missing_folder"] = Int(db.changesCount)
-
-            try db.execute(
-                sql: """
-                DELETE FROM tracks
-                WHERE source_id IS NOT NULL
-                  AND source_id != ''
-                  AND source_id NOT IN (SELECT id FROM data_sources)
-                """
-            )
-            deletedCounts["tracks_missing_source"] = Int(db.changesCount)
-
-            try db.execute(
-                sql: """
-                UPDATE tracks
-                SET album_id = NULL
-                WHERE album_id IS NOT NULL
-                  AND album_id NOT IN (SELECT id FROM albums)
-                """
-            )
-            deletedCounts["tracks_missing_album"] = Int(db.changesCount)
-
-            try db.execute(
-                sql: """
-                UPDATE tracks
-                SET primary_track_id = NULL
-                WHERE primary_track_id IS NOT NULL
-                  AND primary_track_id NOT IN (SELECT id FROM tracks)
-                """
-            )
-            deletedCounts["tracks_missing_primary"] = Int(db.changesCount)
-
-            // 2. Clean up orphaned entries in junction/cache tables.
+            // 1. Clean up orphaned entries in junction tables first.
+            // Using raw SQL for these as GRDB doesn't have clean syntax for NOT IN subqueries.
             
             // Remove track_artists entries where track no longer exists
             try db.execute(
@@ -92,14 +37,6 @@ extension DatabaseManager {
                 """
             )
             deletedCounts["track_artists"] = Int(db.changesCount)
-
-            try db.execute(
-                sql: """
-                DELETE FROM track_artists
-                WHERE artist_id NOT IN (SELECT id FROM artists)
-                """
-            )
-            deletedCounts["track_artists_missing_artist"] = Int(db.changesCount)
             
             // Remove track_genres entries where track no longer exists
             try db.execute(
@@ -109,14 +46,6 @@ extension DatabaseManager {
                 """
             )
             deletedCounts["track_genres"] = Int(db.changesCount)
-
-            try db.execute(
-                sql: """
-                DELETE FROM track_genres
-                WHERE genre_id NOT IN (SELECT id FROM genres)
-                """
-            )
-            deletedCounts["track_genres_missing_genre"] = Int(db.changesCount)
             
             // Remove album_artists entries where album no longer exists
             try db.execute(
@@ -126,14 +55,6 @@ extension DatabaseManager {
                 """
             )
             deletedCounts["album_artists"] = Int(db.changesCount)
-
-            try db.execute(
-                sql: """
-                DELETE FROM album_artists
-                WHERE artist_id NOT IN (SELECT id FROM artists)
-                """
-            )
-            deletedCounts["album_artists_missing_artist"] = Int(db.changesCount)
             
             // Remove playlist_tracks entries where track no longer exists
             try db.execute(
@@ -143,24 +64,8 @@ extension DatabaseManager {
                 """
             )
             deletedCounts["playlist_tracks"] = Int(db.changesCount)
-
-            try db.execute(
-                sql: """
-                DELETE FROM playlist_tracks
-                WHERE playlist_id NOT IN (SELECT id FROM playlists)
-                """
-            )
-            deletedCounts["playlist_tracks_missing_playlist"] = Int(db.changesCount)
-
-            try db.execute(
-                sql: """
-                DELETE FROM emby_favorite_cache
-                WHERE source_id NOT IN (SELECT id FROM data_sources)
-                """
-            )
-            deletedCounts["emby_favorite_cache"] = Int(db.changesCount)
             
-            // 3. Now clean up main tables using GRDB where possible
+            // 2. Now clean up main tables using GRDB where possible.
             
             // Get all artist IDs that are still referenced in track_artists
             let artistsWithTracks = try TrackArtist
@@ -213,7 +118,7 @@ extension DatabaseManager {
                 deletedCounts["genres"] = orphanedGenres
             }
             
-            // 4. Clean up other orphaned data using raw SQL
+            // 3. Clean up other orphaned data using raw SQL.
             
             // Check if extended_metadata table exists before cleaning
             let hasExtendedMetadata = try db.tableExists("extended_metadata")

@@ -218,6 +218,9 @@ struct NotificationTray: View {
         .onHover { hovering in
             isHovered = hovering
         }
+        .onAppear {
+            showingActivity = manager.isActivityInProgress
+        }
         .onChange(of: manager.isActivityInProgress) { _, newValue in
             if newValue {
                 showingActivity = true
