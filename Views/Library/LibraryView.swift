@@ -14,9 +14,14 @@ struct LibraryView: View {
     @State private var selectedTrackID: UUID?
     @State private var cachedFilteredTracks: [Track] = []
     @State private var isLibrarySearchActive = false
+    @State private var isFilterLoading = false
     @State private var isViewReady = false
     @State private var trackTableSortOrder = [KeyPathComparator(\Track.title)]
     @State private var filterUpdateTask: Task<Void, Never>?
+    @State private var filteredTrackOffset = 0
+    @State private var hasMoreFilteredTracks = true
+    @State private var filterRequestID = UUID()
+    @State private var queueHydrationTask: Task<Void, Never>?
     @Binding var pendingFilter: LibraryFilterRequest?
 
     var body: some View {
@@ -26,13 +31,16 @@ struct LibraryView: View {
             tracksListView
                 .onAppear {
                     processPendingFilter()
+                    updateFilteredTracks()
                 }
                 .onDisappear {
+                    filterUpdateTask?.cancel()
+                    isFilterLoading = false
                     isViewReady = false
                 }
                 .onChange(of: libraryManager.tracks) { _, newTracks in
                     if let currentItem = selectedFilterItem, currentItem.isAllItem {
-                        selectedFilterItem = LibraryFilterItem.allItem(for: selectedFilterType, totalCount: newTracks.count)
+                        selectedFilterItem = LibraryFilterItem.allItem(for: selectedFilterType, totalCount: libraryManager.totalTrackCount)
                     }
                 }
                 .onChange(of: selectedFilterItem) {
@@ -49,6 +57,9 @@ struct LibraryView: View {
                 }
                 .onChange(of: libraryManager.globalSearchText) {
                     handleGlobalSearch()
+                }
+                .onChange(of: trackTableSortOrder) { _, _ in
+                    updateFilteredTracks()
                 }
                 .onReceive(NotificationCenter.default.publisher(for: .libraryDataDidChange)) { _ in
                     updateFilteredTracks()
@@ -103,28 +114,53 @@ struct LibraryView: View {
             Divider()
 
             // Tracks list content
-            if cachedFilteredTracks.isEmpty && !isLibrarySearchActive {
+            if isFilterLoading && cachedFilteredTracks.isEmpty {
+                loadingView
+            } else if cachedFilteredTracks.isEmpty && !isLibrarySearchActive {
                 emptyFilterView
             } else {
-                TrackView(
-                    tracks: cachedFilteredTracks,
-                    selectedTrackID: $selectedTrackID,
-                    playlistID: nil,
-                    entityID: nil,
-                    sortOrder: $trackTableSortOrder,
-                    onPlayTrack: { track in
-                        playlistManager.playTrack(track, fromTracks: cachedFilteredTracks)
-                        playlistManager.currentQueueSource = .library
-                    },
-                    contextMenuItems: { track, playbackManager in
-                        TrackContextMenu.createMenuItems(
-                            for: track,
-                            playbackManager: playbackManager,
-                            playlistManager: playlistManager,
-                            currentContext: .library
+                VStack(spacing: 0) {
+                    TrackView(
+                        tracks: cachedFilteredTracks,
+                        selectedTrackID: $selectedTrackID,
+                        playlistID: nil,
+                        entityID: nil,
+                        sortOrder: $trackTableSortOrder,
+                        onPlayTrack: { track in
+                            playlistManager.playTrack(track, fromTracks: cachedFilteredTracks)
+                            playlistManager.currentQueueSource = .library
+                            hydrateCurrentFilterQueue(
+                                afterSelecting: track,
+                                filterType: selectedFilterType,
+                                filterItem: selectedFilterItem
+                            )
+                        },
+                        contextMenuItems: { track, playbackManager in
+                            TrackContextMenu.createMenuItems(
+                                for: track,
+                                playbackManager: playbackManager,
+                                playlistManager: playlistManager,
+                                currentContext: .library
+                            )
+                        },
+                        hasMoreTracks: hasMoreFilteredTracks,
+                        isLoadingMoreTracks: isFilterLoading,
+                        onReachBottom: {
+                            loadNextFilteredTracksPage()
+                        }
+                    )
+                    .id(trackListIdentity)
+
+                    if shouldShowPaginationFooter {
+                        TrackPaginationFooter(
+                            loadedCount: cachedFilteredTracks.count,
+                            totalCount: currentTrackTotalCount,
+                            pageSize: DatabaseConstants.trackListPageSize,
+                            isLoading: isFilterLoading,
+                            hasMore: hasMoreFilteredTracks
                         )
                     }
-                )
+                }
             }
         }
     }
@@ -177,12 +213,34 @@ struct LibraryView: View {
         .padding()
     }
 
+    private var loadingView: some View {
+        VStack(spacing: 16) {
+            ProgressView()
+                .controlSize(.regular)
+
+            Text("Loading Tracks")
+                .font(.headline)
+
+            Text("Updating the current library selection...")
+                .font(.subheadline)
+                .foregroundColor(.secondary)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .padding()
+    }
+
     // MARK: - Filtering Tracks Helper
 
     private func updateFilteredTracks() {
         filterUpdateTask?.cancel()
+        selectedTrackID = nil
+        isFilterLoading = false
+        filterRequestID = UUID()
         
         if !libraryManager.globalSearchText.isEmpty {
+            isFilterLoading = false
+            filteredTrackOffset = 0
+            hasMoreFilteredTracks = false
             var tracks = libraryManager.searchResults
             
             if let filterItem = selectedFilterItem, !filterItem.isAllItem {
@@ -193,36 +251,170 @@ struct LibraryView: View {
             
             cachedFilteredTracks = tracks
         } else {
-            if let filterItem = selectedFilterItem {
-                if filterItem.isAllItem {
-                    cachedFilteredTracks = []
-                } else {
-                    let filterType = selectedFilterType
-                    let filterValue = filterItem.name
-                    let libManager = libraryManager
-                    
-                    filterUpdateTask = Task {
-                        try? await Task.sleep(nanoseconds: TimeConstants.oneHundredMilliseconds)
-                        
-                        guard !Task.isCancelled else { return }
-                        
-                        let tracks = await Task.detached {
-                            var tracks = libManager.getTracksBy(filterType: filterType, value: filterValue)
-                            libManager.databaseManager.populateAlbumArtworkForTracks(&tracks)
-                            return tracks
-                        }.value
-                        
-                        guard !Task.isCancelled else { return }
-                        
-                        await MainActor.run {
-                            self.cachedFilteredTracks = tracks
-                        }
-                    }
-                }
+            if selectedFilterItem != nil {
+                loadNextFilteredTracksPage(reset: true)
             } else {
+                isFilterLoading = false
                 cachedFilteredTracks = []
+                filteredTrackOffset = 0
+                hasMoreFilteredTracks = false
             }
         }
+    }
+
+    private var shouldShowPaginationFooter: Bool {
+        libraryManager.globalSearchText.isEmpty && (!cachedFilteredTracks.isEmpty || hasMoreFilteredTracks)
+    }
+
+    private var currentTrackTotalCount: Int? {
+        if !libraryManager.globalSearchText.isEmpty {
+            return libraryManager.searchResults.count
+        }
+
+        if let selectedFilterItem {
+            return selectedFilterItem.isAllItem ? libraryManager.totalTrackCount : selectedFilterItem.count
+        }
+
+        return nil
+    }
+
+    private func loadNextFilteredTracksPage(reset: Bool = false) {
+        guard !libraryManager.globalSearchText.isEmpty || selectedFilterItem != nil else {
+            cachedFilteredTracks = []
+            filteredTrackOffset = 0
+            hasMoreFilteredTracks = false
+            isFilterLoading = false
+            return
+        }
+
+        guard reset || !isFilterLoading else { return }
+        guard reset || hasMoreFilteredTracks else { return }
+        guard let selectedFilterItem else { return }
+
+        let requestID = reset ? UUID() : filterRequestID
+        let nextOffset = reset ? 0 : filteredTrackOffset
+        let sortField = TrackSortField.detect(from: trackTableSortOrder)
+        let ascending = TrackSortField.isAscending(from: trackTableSortOrder)
+        let databaseManager = libraryManager.databaseManager
+        let filterType = selectedFilterType
+        let filterValue = selectedFilterItem.name
+
+        if reset {
+            filterRequestID = requestID
+            cachedFilteredTracks = []
+            filteredTrackOffset = 0
+            hasMoreFilteredTracks = true
+        }
+
+        isFilterLoading = true
+
+        filterUpdateTask = Task {
+            let tracks = await Task.detached {
+                if selectedFilterItem.isAllItem {
+                    return databaseManager.getAllTracksPage(
+                        limit: DatabaseConstants.trackListPageSize,
+                        offset: nextOffset,
+                        sortField: sortField,
+                        ascending: ascending
+                    )
+                }
+
+                return databaseManager.getTracksPage(
+                    filterType: filterType,
+                    value: filterValue,
+                    limit: DatabaseConstants.trackListPageSize,
+                    offset: nextOffset,
+                    sortField: sortField,
+                    ascending: ascending
+                )
+            }.value
+
+            guard !Task.isCancelled else { return }
+
+            await MainActor.run {
+                guard filterRequestID == requestID else { return }
+
+                if reset {
+                    cachedFilteredTracks = tracks
+                } else {
+                    cachedFilteredTracks.append(contentsOf: tracks)
+                }
+
+                filteredTrackOffset = nextOffset + tracks.count
+                hasMoreFilteredTracks = tracks.count == DatabaseConstants.trackListPageSize
+                isFilterLoading = false
+            }
+        }
+    }
+
+    private func hydrateCurrentFilterQueue(
+        afterSelecting track: Track,
+        filterType: LibraryFilterType,
+        filterItem: LibraryFilterItem?
+    ) {
+        guard libraryManager.globalSearchText.isEmpty else { return }
+        guard let filterItem else { return }
+
+        let databaseManager = libraryManager.databaseManager
+        let sortField = TrackSortField.detect(from: trackTableSortOrder)
+        let ascending = TrackSortField.isAscending(from: trackTableSortOrder)
+        let filterName = filterItem.name
+        let isAllItem = filterItem.isAllItem
+
+        queueHydrationTask?.cancel()
+        queueHydrationTask = Task {
+            var allTracks: [Track] = []
+            var offset = 0
+
+            while true {
+                let page = await Task.detached {
+                    if isAllItem {
+                        return databaseManager.getAllTracksPage(
+                            limit: DatabaseConstants.trackListPageSize,
+                            offset: offset,
+                            sortField: sortField,
+                            ascending: ascending
+                        )
+                    }
+
+                    return databaseManager.getTracksPage(
+                        filterType: filterType,
+                        value: filterName,
+                        limit: DatabaseConstants.trackListPageSize,
+                        offset: offset,
+                        sortField: sortField,
+                        ascending: ascending
+                    )
+                }.value
+
+                guard !Task.isCancelled else { return }
+
+                allTracks.append(contentsOf: page)
+
+                if page.count < DatabaseConstants.trackListPageSize {
+                    break
+                }
+
+                offset += page.count
+            }
+
+            await MainActor.run {
+                guard libraryManager.globalSearchText.isEmpty else { return }
+                guard selectedFilterType == filterType else { return }
+                guard selectedFilterItem?.name == filterName else { return }
+                guard playlistManager.currentQueue.indices.contains(playlistManager.currentQueueIndex) else { return }
+                guard playlistManager.currentQueue[playlistManager.currentQueueIndex].id == track.id else { return }
+
+                playlistManager.replaceCurrentQueue(with: allTracks, startingAt: track, source: .library)
+            }
+        }
+    }
+
+    private var trackListIdentity: String {
+        let filterName = selectedFilterItem?.name ?? "none"
+        let sortField = TrackSortField.detect(from: trackTableSortOrder).rawValue
+        let sortAscending = TrackSortField.isAscending(from: trackTableSortOrder)
+        return "\(selectedFilterType.rawValue)|\(filterName)|\(libraryManager.globalSearchText)|\(sortField)|\(sortAscending)"
     }
 }
 

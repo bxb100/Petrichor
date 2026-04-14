@@ -238,8 +238,17 @@ extension DatabaseManager {
     func removeFolder(_ folder: Folder, completion: @escaping (Result<Void, Error>) -> Void) {
         Task {
             do {
+                guard let folderId = folder.id else {
+                    throw DatabaseError.invalidFolderId
+                }
+
                 _ = try await dbQueue.write { db in
-                    // Delete the folder (cascades to tracks and junction tables)
+                    let trackIds = try Track
+                        .filter(Track.Columns.folderId == folderId)
+                        .select(Track.Columns.trackId, as: Int64.self)
+                        .fetchAll(db)
+
+                    try deleteTracks(withRowIDs: trackIds, in: db)
                     try folder.delete(db)
                 }
                 
@@ -568,7 +577,7 @@ extension DatabaseManager {
         let existingTracks = getTracksForFolder(folderId)
         let foundPathStrings = Set(foundPaths.map { $0.path })
         let tracksToRemove = existingTracks.filter { !foundPathStrings.contains($0.url.path) }
-        let trackIdsToRemove = tracksToRemove.compactMap { $0.id }
+        let trackIdsToRemove = tracksToRemove.compactMap(\.trackId)
         
         guard !trackIdsToRemove.isEmpty else { return }
         
@@ -576,14 +585,15 @@ extension DatabaseManager {
         
         // Remove tracks from database
         try await dbQueue.write { db in
-            for track in tracksToRemove {
-                try track.delete(db)
-                Logger.info("Removed track that no longer exists: \(track.url.lastPathComponent)")
-            }
+            try deleteTracks(withRowIDs: trackIdsToRemove, in: db)
+        }
+
+        for track in tracksToRemove {
+            Logger.info("Removed track that no longer exists: \(track.url.lastPathComponent)")
         }
         
         // Clean up orphaned metadata
-        try await cleanupAfterTrackRemoval(trackIdsToRemove)
+        try await cleanupOrphanedData()
         
         // Report results to user
         await MainActor.run {

@@ -77,15 +77,6 @@ extension LibraryManager {
         }
     }
 
-    func syncRemoteSourcesOnLaunch() async {
-        let sources = dataSources.filter { $0.kind == .emby }
-        guard !sources.isEmpty else { return }
-
-        for source in sources {
-            await syncEmbySource(source, forceFavoriteRefresh: false, showNotifications: false)
-        }
-    }
-
     func syncEmbySource(
         _ source: LibraryDataSource,
         forceFavoriteRefresh: Bool = false,
@@ -95,11 +86,74 @@ extension LibraryManager {
 
         do {
             let session = try await validSession(for: source)
-            let items = try await embyService.fetchAllAudioItems(source: source, session: session)
-            let favoriteIDs = try await favoriteItemIDs(for: source, session: session, forceRefresh: forceFavoriteRefresh)
-            let tracks = items.compactMap { buildTrack(from: $0, source: source, favoriteIDs: favoriteIDs) }
+            async let favoriteIDsTask: Set<String> = {
+                do {
+                    return try await favoriteItemIDs(
+                        for: source,
+                        session: session,
+                        forceRefresh: forceFavoriteRefresh
+                    )
+                } catch {
+                    Logger.warning("Failed to refresh Emby favorites for '\(source.name)': \(error)")
+                    return []
+                }
+            }()
 
-            try await databaseManager.replaceTracks(for: source, tracks: tracks)
+            let pageSize = DatabaseConstants.embySyncPageSize
+            var startIndex = 0
+            var retainedTrackKeys = Set<String>()
+            var syncedTrackCount = 0
+            var reportedTotalTrackCount = 0
+
+            if showNotifications {
+                await MainActor.run {
+                    NotificationManager.shared.startActivity("Syncing Emby source '\(source.name)'...")
+                }
+            }
+
+            while true {
+                let page = try await embyService.fetchAudioItemsPage(
+                    source: source,
+                    session: session,
+                    startIndex: startIndex,
+                    limit: pageSize
+                )
+
+                let items = page.items ?? []
+                if reportedTotalTrackCount == 0 {
+                    reportedTotalTrackCount = page.totalRecordCount ?? items.count
+                }
+
+                let tracks = items.compactMap { buildTrack(from: $0, source: source, favoriteIDs: []) }
+                let pageTrackKeys = try await databaseManager.upsertTracksPage(for: source, tracks: tracks)
+                retainedTrackKeys.formUnion(pageTrackKeys)
+                syncedTrackCount += tracks.count
+                let currentSyncedTrackCount = syncedTrackCount
+                let currentReportedTotalTrackCount = max(reportedTotalTrackCount, currentSyncedTrackCount)
+                let currentDetail = "Indexed \(currentSyncedTrackCount) tracks from '\(source.name)'"
+
+                await MainActor.run {
+                    self.scheduleLibraryReload(delay: 0.05)
+                    if showNotifications {
+                        NotificationManager.shared.updateActivityProgress(
+                            current: currentSyncedTrackCount,
+                            total: currentReportedTotalTrackCount,
+                            detail: currentDetail
+                        )
+                    }
+                }
+
+                guard items.count == pageSize else { break }
+                startIndex += pageSize
+            }
+
+            try await databaseManager.deleteRemoteTracks(for: source, retaining: retainedTrackKeys)
+
+            let favoriteIDs = await favoriteIDsTask
+            if source.syncFavorites {
+                try await databaseManager.applyFavoriteState(for: source.id, favoriteItemIds: favoriteIDs)
+            }
+
             try await databaseManager.updateDataSourceSyncState(
                 sourceId: source.id,
                 lastSyncedAt: Date(),
@@ -107,13 +161,15 @@ extension LibraryManager {
                 userId: session.userId,
                 serverId: session.serverId
             )
+            let finalSyncedTrackCount = syncedTrackCount
 
             await MainActor.run {
                 self.loadDataSources()
                 self.loadMusicLibrary()
                 self.refreshDiscoverTracks()
                 if showNotifications {
-                    NotificationManager.shared.addMessage(.info, "Synced Emby source '\(source.name)' (\(tracks.count) tracks).")
+                    NotificationManager.shared.stopActivity()
+                    NotificationManager.shared.addMessage(.info, "Synced Emby source '\(source.name)' (\(finalSyncedTrackCount) tracks).")
                 }
             }
 
@@ -132,6 +188,7 @@ extension LibraryManager {
             await MainActor.run {
                 self.loadDataSources()
                 if showNotifications {
+                    NotificationManager.shared.stopActivity()
                     NotificationManager.shared.addMessage(.error, "Failed to sync Emby source '\(source.name)'.")
                 }
             }
@@ -303,7 +360,10 @@ extension LibraryManager {
         track.composer = item.composers?.compactMap(\.name).joined(separator: "; ") ?? "Unknown Composer"
         let genres = item.genres ?? item.genreItems?.compactMap(\.name)
         track.genre = genres?.joined(separator: "; ") ?? "Unknown Genre"
-        track.year = item.productionYear.map(String.init) ?? "Unknown Year"
+        track.year = MetadataYearResolver.resolvedYear(
+            primaryYear: item.productionYear.map(String.init),
+            releaseDate: item.premiereDate
+        ) ?? "Unknown Year"
         track.duration = Double(item.runTimeTicks ?? item.mediaSources?.first?.runTimeTicks ?? 0) / 10_000_000.0
         track.format = resolvedFormat(from: item)
         track.fileSize = item.size ?? item.mediaSources?.first?.size

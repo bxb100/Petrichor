@@ -42,6 +42,8 @@ class DatabaseManager: ObservableObject {
         config.prepareDatabase { db in
             // Set journal mode to WAL
             try db.execute(sql: "PRAGMA journal_mode = WAL")
+            // Referential cleanup is handled explicitly in app code.
+            try db.execute(sql: "PRAGMA foreign_keys = OFF")
             // Enable synchronous mode for better durability
             try db.execute(sql: "PRAGMA synchronous = NORMAL")
             // Set a reasonable busy timeout

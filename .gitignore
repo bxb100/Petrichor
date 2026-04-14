@@ -91,6 +91,7 @@ iOSInjectionProject/
 
 # macOS specific
 .DS_Store
+Vendor/VLCKitSPM/Binaries/
 .AppleDouble
 .LSOverride
 
@@ -122,4 +123,3 @@ Configuration/Secrets.xcconfig
 
 # Known artists data file (bundled in release builds, generated from MusicBrainz)
 Resources/known_artists_20??????.txt
-

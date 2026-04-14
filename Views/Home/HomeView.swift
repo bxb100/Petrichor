@@ -31,6 +31,12 @@ struct HomeView: View {
     @State private var selectedAlbumEntity: AlbumEntity?
     @State private var isShowingEntityDetail = false
     @State private var trackTableSortOrder = [KeyPathComparator(\Track.title)]
+    @State private var pagedTracks: [Track] = []
+    @State private var pagedTrackOffset = 0
+    @State private var hasMorePagedTracks = true
+    @State private var isLoadingPagedTracks = false
+    @State private var trackPageTask: Task<Void, Never>?
+    @State private var queueHydrationTask: Task<Void, Never>?
     @Binding var isShowingEntities: Bool
     
     var body: some View {
@@ -100,6 +106,10 @@ struct HomeView: View {
                         switch type {
                         case .discover, .tracks:
                             isShowingEntities = false
+                            if type == .tracks {
+                                resetTracksPagination()
+                                loadNextTracksPage(reset: true)
+                            }
                         case .artists:
                             sortArtistEntities()
                         case .albums:
@@ -127,6 +137,16 @@ struct HomeView: View {
                         isShowingEntities = false
                     }
                 }
+            }
+            .onChange(of: trackTableSortOrder) { _, _ in
+                guard isTracksSidebarItemSelected else { return }
+                resetTracksPagination()
+                loadNextTracksPage(reset: true)
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .libraryDataDidChange)) { _ in
+                guard isTracksSidebarItemSelected else { return }
+                resetTracksPagination()
+                loadNextTracksPage(reset: true)
             }
         }
     }
@@ -212,8 +232,7 @@ struct HomeView: View {
             
             Divider()
             
-            // Show loading or tracks
-            if libraryManager.tracks.isEmpty {
+            if isLoadingPagedTracks && pagedTracks.isEmpty {
                 VStack {
                     Spacer()
                     ProgressView()
@@ -222,32 +241,59 @@ struct HomeView: View {
                     Spacer()
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .onAppear {
-                    Task {
-                        await libraryManager.loadAllTracks()
-                    }
+            } else if pagedTracks.isEmpty {
+                VStack(spacing: 16) {
+                    Image(systemName: Icons.musicNoteList)
+                        .font(.system(size: 48))
+                        .foregroundColor(.gray)
+
+                    Text("No tracks found")
+                        .font(.headline)
+                        .foregroundColor(.secondary)
                 }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
-                TrackView(
-                    tracks: libraryManager.tracks,
-                    selectedTrackID: $selectedTrackID,
-                    playlistID: nil,
-                    entityID: nil,
-                    sortOrder: $trackTableSortOrder,
-                    onPlayTrack: { track in
-                        playlistManager.playTrack(track, fromTracks: libraryManager.tracks)
-                        playlistManager.currentQueueSource = .library
-                    },
-                    contextMenuItems: { track, playbackManager in
-                        TrackContextMenu.createMenuItems(
-                            for: track,
-                            playbackManager: playbackManager,
-                            playlistManager: playlistManager,
-                            currentContext: .library
-                        )
-                    }
-                )
+                VStack(spacing: 0) {
+                    TrackView(
+                        tracks: pagedTracks,
+                        selectedTrackID: $selectedTrackID,
+                        playlistID: nil,
+                        entityID: nil,
+                        sortOrder: $trackTableSortOrder,
+                        onPlayTrack: { track in
+                            playlistManager.playTrack(track, fromTracks: pagedTracks)
+                            playlistManager.currentQueueSource = .library
+                            hydrateFullLibraryQueue(afterSelecting: track)
+                        },
+                        contextMenuItems: { track, playbackManager in
+                            TrackContextMenu.createMenuItems(
+                                for: track,
+                                playbackManager: playbackManager,
+                                playlistManager: playlistManager,
+                                currentContext: .library
+                            )
+                        },
+                        hasMoreTracks: hasMorePagedTracks,
+                        isLoadingMoreTracks: isLoadingPagedTracks,
+                        onReachBottom: {
+                            loadNextTracksPage()
+                        }
+                    )
+
+                    TrackPaginationFooter(
+                        loadedCount: pagedTracks.count,
+                        totalCount: libraryManager.totalTrackCount,
+                        pageSize: DatabaseConstants.trackListPageSize,
+                        isLoading: isLoadingPagedTracks,
+                        hasMore: hasMorePagedTracks
+                    )
+                }
             }
+        }
+        .onAppear {
+            guard pagedTracks.isEmpty, !isLoadingPagedTracks else { return }
+            resetTracksPagination()
+            loadNextTracksPage(reset: true)
         }
     }
     
@@ -517,6 +563,109 @@ struct HomeView: View {
                 .foregroundColor(.secondary)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private var isTracksSidebarItemSelected: Bool {
+        guard let selectedSidebarItem else { return false }
+        if case .fixed(.tracks) = selectedSidebarItem.source {
+            return true
+        }
+        return false
+    }
+
+    private func resetTracksPagination() {
+        trackPageTask?.cancel()
+        selectedTrackID = nil
+        pagedTracks = []
+        pagedTrackOffset = 0
+        hasMorePagedTracks = true
+        isLoadingPagedTracks = false
+    }
+
+    private func loadNextTracksPage(reset: Bool = false) {
+        guard !isLoadingPagedTracks else { return }
+        guard reset || hasMorePagedTracks else { return }
+
+        let databaseManager = libraryManager.databaseManager
+        let nextOffset = reset ? 0 : pagedTrackOffset
+        let sortField = TrackSortField.detect(from: trackTableSortOrder)
+        let ascending = TrackSortField.isAscending(from: trackTableSortOrder)
+
+        trackPageTask?.cancel()
+        isLoadingPagedTracks = true
+
+        if reset {
+            selectedTrackID = nil
+            pagedTracks = []
+            pagedTrackOffset = 0
+            hasMorePagedTracks = true
+        }
+
+        trackPageTask = Task {
+            let page = await Task.detached {
+                databaseManager.getAllTracksPage(
+                    limit: DatabaseConstants.trackListPageSize,
+                    offset: nextOffset,
+                    sortField: sortField,
+                    ascending: ascending
+                )
+            }.value
+
+            guard !Task.isCancelled else { return }
+
+            await MainActor.run {
+                if reset {
+                    pagedTracks = page
+                } else {
+                    pagedTracks.append(contentsOf: page)
+                }
+
+                pagedTrackOffset = nextOffset + page.count
+                hasMorePagedTracks = page.count == DatabaseConstants.trackListPageSize
+                isLoadingPagedTracks = false
+            }
+        }
+    }
+
+    private func hydrateFullLibraryQueue(afterSelecting track: Track) {
+        let databaseManager = libraryManager.databaseManager
+        let sortField = TrackSortField.detect(from: trackTableSortOrder)
+        let ascending = TrackSortField.isAscending(from: trackTableSortOrder)
+
+        queueHydrationTask?.cancel()
+        queueHydrationTask = Task {
+            var allTracks: [Track] = []
+            var offset = 0
+
+            while true {
+                let page = await Task.detached {
+                    databaseManager.getAllTracksPage(
+                        limit: DatabaseConstants.trackListPageSize,
+                        offset: offset,
+                        sortField: sortField,
+                        ascending: ascending
+                    )
+                }.value
+
+                guard !Task.isCancelled else { return }
+
+                allTracks.append(contentsOf: page)
+
+                if page.count < DatabaseConstants.trackListPageSize {
+                    break
+                }
+
+                offset += page.count
+            }
+
+            await MainActor.run {
+                guard isTracksSidebarItemSelected else { return }
+                guard playlistManager.currentQueue.indices.contains(playlistManager.currentQueueIndex) else { return }
+                guard playlistManager.currentQueue[playlistManager.currentQueueIndex].id == track.id else { return }
+
+                playlistManager.replaceCurrentQueue(with: allTracks, startingAt: track, source: .library)
+            }
+        }
     }
 
     private func sortArtistEntities() {

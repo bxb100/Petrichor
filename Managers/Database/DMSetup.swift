@@ -161,8 +161,8 @@ extension DatabaseManager {
     // MARK: - Album Artists Junction Table
     static func createAlbumArtistsTable(in db: Database) throws {
         try db.createTableIfNotExists("album_artists") { t in
-            t.column("album_id", .integer).notNull().references("albums", onDelete: .cascade)
-            t.column("artist_id", .integer).notNull().references("artists", onDelete: .cascade)
+            t.column("album_id", .integer).notNull()
+            t.column("artist_id", .integer).notNull()
             t.column("role", .text).notNull().defaults(to: "primary")
             t.column("position", .integer).notNull().defaults(to: 0)
             t.primaryKey(["album_id", "artist_id", "role"])
@@ -183,12 +183,12 @@ extension DatabaseManager {
     static func createTracksTable(in db: Database) throws {
         try db.createTableIfNotExists("tracks") { t in
             t.autoIncrementedPrimaryKey("id")
-            t.column("folder_id", .integer).references("folders", onDelete: .cascade)
-            t.column("source_id", .text).references("data_sources", column: "id", onDelete: .cascade)
+            t.column("folder_id", .integer)
+            t.column("source_id", .text)
             t.column("source_kind", .text).notNull().defaults(to: LibrarySourceKind.local.rawValue)
             t.column("remote_item_id", .text)
             t.column("remote_enrichment_state", .text).notNull().defaults(to: RemoteTrackEnrichmentState.completed.rawValue)
-            t.column("album_id", .integer).references("albums", onDelete: .setNull)
+            t.column("album_id", .integer)
             t.column("path", .text).notNull().unique()
             t.column("filename", .text).notNull()
             t.column("title", .text)
@@ -209,7 +209,7 @@ extension DatabaseManager {
             
             // Duplicate tracking
             t.column("is_duplicate", .boolean).notNull().defaults(to: false)
-            t.column("primary_track_id", .integer).references("tracks", column: "id", onDelete: .setNull)
+            t.column("primary_track_id", .integer)
             t.column("duplicate_group_id", .text)
 
             // Additional metadata
@@ -247,7 +247,7 @@ extension DatabaseManager {
     // MARK: - Emby Favorite Cache Table
     static func createEmbyFavoriteCacheTable(in db: Database) throws {
         try db.createTableIfNotExists("emby_favorite_cache") { t in
-            t.column("source_id", .text).notNull().references("data_sources", column: "id", onDelete: .cascade)
+            t.column("source_id", .text).notNull()
             t.column("item_id", .text).notNull()
             t.column("cached_at", .datetime).notNull()
             t.primaryKey(["source_id", "item_id"])
@@ -275,8 +275,8 @@ extension DatabaseManager {
     // MARK: - Playlist Tracks Table
     static func createPlaylistTracksTable(in db: Database) throws {
         try db.createTableIfNotExists("playlist_tracks") { t in
-            t.column("playlist_id", .text).notNull().references("playlists", column: "id", onDelete: .cascade)
-            t.column("track_id", .integer).notNull().references("tracks", column: "id", onDelete: .cascade)
+            t.column("playlist_id", .text).notNull()
+            t.column("track_id", .integer).notNull()
             t.column("position", .integer).notNull()
             t.column("date_added", .datetime).notNull()
             t.primaryKey(["playlist_id", "track_id"])
@@ -287,8 +287,8 @@ extension DatabaseManager {
     // MARK: - Track Artists Junction Table
     static func createTrackArtistsTable(in db: Database) throws {
         try db.createTableIfNotExists("track_artists") { t in
-            t.column("track_id", .integer).notNull().references("tracks", onDelete: .cascade)
-            t.column("artist_id", .integer).notNull().references("artists", onDelete: .cascade)
+            t.column("track_id", .integer).notNull()
+            t.column("artist_id", .integer).notNull()
             t.column("role", .text).notNull().defaults(to: "artist")
             t.column("position", .integer).notNull().defaults(to: 0)
             t.primaryKey(["track_id", "artist_id", "role"])
@@ -299,8 +299,8 @@ extension DatabaseManager {
     // MARK: - Track Genres Junction Table
     static func createTrackGenresTable(in db: Database) throws {
         try db.createTableIfNotExists("track_genres") { t in
-            t.column("track_id", .integer).notNull().references("tracks", onDelete: .cascade)
-            t.column("genre_id", .integer).notNull().references("genres", onDelete: .cascade)
+            t.column("track_id", .integer).notNull()
+            t.column("genre_id", .integer).notNull()
             t.primaryKey(["track_id", "genre_id"])
         }
         Logger.info("Created `track_genres` table")

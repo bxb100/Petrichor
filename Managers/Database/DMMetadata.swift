@@ -10,13 +10,19 @@ import GRDB
 
 extension DatabaseManager {
     func applyMetadataToTrack(_ track: inout FullTrack, from metadata: TrackMetadata, at fileURL: URL) {
+        let resolvedYear = MetadataYearResolver.resolvedYear(
+            primaryYear: metadata.year,
+            releaseDate: metadata.releaseDate,
+            originalReleaseDate: metadata.originalReleaseDate
+        )
+
         // Core fields
         track.title = metadata.title ?? fileURL.deletingPathExtension().lastPathComponent
         track.artist = metadata.artist ?? "Unknown Artist"
         track.album = metadata.album ?? "Unknown Album"
         track.genre = metadata.genre ?? "Unknown Genre"
         track.composer = metadata.composer ?? "Unknown Composer"
-        track.year = metadata.year ?? ""
+        track.year = resolvedYear ?? "Unknown Year"
         track.duration = metadata.duration
         
         // Avoid storing album art in track table for tracks with albums
@@ -90,6 +96,11 @@ extension DatabaseManager {
 
     func updateCoreMetadata(_ track: inout FullTrack, with metadata: TrackMetadata) -> Bool {
         var hasChanges = false
+        let resolvedYear = MetadataYearResolver.resolvedYear(
+            primaryYear: metadata.year,
+            releaseDate: metadata.releaseDate,
+            originalReleaseDate: metadata.originalReleaseDate
+        )
 
         if let newTitle = metadata.title, !newTitle.isEmpty && newTitle != track.title {
             track.title = newTitle
@@ -120,7 +131,7 @@ extension DatabaseManager {
             hasChanges = true
         }
 
-        if let newYear = metadata.year,
+        if let newYear = resolvedYear,
            !newYear.isEmpty,
            track.year.isEmpty || track.year == "Unknown Year" || track.year != newYear {
             track.year = newYear

@@ -8,6 +8,9 @@ struct TrackTableView: View {
     let contextMenuItems: ([Track], PlaybackManager) -> [ContextMenuItem]
     @Binding var sortOrder: [KeyPathComparator<Track>]
     @Binding var tableRowSize: TableRowSize
+    let hasMoreTracks: Bool
+    let isLoadingMoreTracks: Bool
+    let onReachBottom: (() -> Void)?
     
     @EnvironmentObject var playbackManager: PlaybackManager
     @EnvironmentObject var playlistManager: PlaylistManager
@@ -17,6 +20,8 @@ struct TrackTableView: View {
     @State private var trackFavorites: [Int64: Bool] = [:]
     @State private var lastSelectionTime: Date = Date()
     @State private var lastSelectedTrackID: Track.ID?
+    @State private var sortTask: Task<Void, Never>?
+    @State private var sortRequestID = UUID()
     
     @State private var currentTrackId: Int64?
     @State private var isCustomSort: Bool = false
@@ -105,25 +110,39 @@ struct TrackTableView: View {
                 }
             }
             .onChange(of: tracks) { _, newTracks in
-                if !newTracks.isEmpty {
-                    // Re-sync custom sort state for the current playlist
-                    if let playlistID = playlistID {
-                        isCustomSort = PlaylistSortManager.shared.getSortField(for: playlistID) == .custom
-                    }
-
-                    if isCustomSort {
-                        sortedTracks = newTracks
-                    } else {
-                        performBackgroundSort(with: sortOrder)
-                    }
-
-                    trackFavorites = Dictionary(uniqueKeysWithValues:
-                        newTracks.compactMap { track in
-                            guard let trackId = track.trackId else { return nil }
-                            return (trackId, track.isFavorite)
-                        }
-                    )
+                guard !newTracks.isEmpty else {
+                    sortTask?.cancel()
+                    sortRequestID = UUID()
+                    sortedTracks = []
+                    trackFavorites = [:]
+                    selection.removeAll()
+                    lastSelectedTrackID = nil
+                    return
                 }
+
+                let validTrackIDs = Set(newTracks.map(\.id))
+                selection = selection.intersection(validTrackIDs)
+                if let lastSelectedTrackID, !validTrackIDs.contains(lastSelectedTrackID) {
+                    self.lastSelectedTrackID = nil
+                }
+
+                // Re-sync custom sort state for the current playlist
+                if let playlistID = playlistID {
+                    isCustomSort = PlaylistSortManager.shared.getSortField(for: playlistID) == .custom
+                }
+
+                if isCustomSort {
+                    sortedTracks = newTracks
+                } else {
+                    performBackgroundSort(with: sortOrder)
+                }
+
+                trackFavorites = Dictionary(uniqueKeysWithValues:
+                    newTracks.compactMap { track in
+                        guard let trackId = track.trackId else { return nil }
+                        return (trackId, track.isFavorite)
+                    }
+                )
             }
             .onAppear {
                 currentTrackId = playbackManager.currentTrack?.trackId
@@ -210,6 +229,9 @@ struct TrackTableView: View {
                         handlePlayTrack: handlePlayTrack
                     ) { playbackManager.togglePlayPause() }
                     .frame(maxWidth: .infinity, alignment: .leading)
+                    .onAppear {
+                        triggerPaginationIfNeeded(for: track)
+                    }
                 }
                 .width(min: 200)
                 .customizationID("title")
@@ -314,6 +336,13 @@ struct TrackTableView: View {
     }
     
     // MARK: - Helper Methods
+
+    private func triggerPaginationIfNeeded(for track: Track) {
+        guard hasMoreTracks else { return }
+        guard !isLoadingMoreTracks else { return }
+        guard sortedTracks.last?.id == track.id else { return }
+        onReachBottom?()
+    }
     
     private func initializeSortedTracks() {
         // Check for custom sort on playlists (position-based order from DB)
@@ -391,16 +420,23 @@ struct TrackTableView: View {
     // MARK: - Sorting Helpers
     
     private func performBackgroundSort(with newSortOrder: [KeyPathComparator<Track>]) {
+        sortTask?.cancel()
+
         if isCustomSort {
             sortedTracks = tracks
             return
         }
 
-        let initialTracks = (sortedTracks.count != tracks.count) ? tracks : sortedTracks
+        let requestID = UUID()
+        let tracksToSort = tracks
+        sortRequestID = requestID
 
-        Task.detached(priority: .userInitiated) {
-            let sorted = initialTracks.sorted(using: newSortOrder)
+        sortTask = Task.detached(priority: .userInitiated) {
+            let sorted = tracksToSort.sorted(using: newSortOrder)
+            guard !Task.isCancelled else { return }
+
             await MainActor.run {
+                guard self.sortRequestID == requestID else { return }
                 self.sortedTracks = sorted
             }
         }

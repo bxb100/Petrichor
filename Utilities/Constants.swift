@@ -202,6 +202,8 @@ enum DatabaseConstants {
     static let batchSize = 50
     static let largeBatchSize = 100
     static let remoteArtworkDownloadConcurrency = 4
+    static let embySyncPageSize = 200
+    static let trackListPageSize = 500
 }
 
 // MARK: - Default Playlists

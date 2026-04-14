@@ -192,15 +192,9 @@ struct LibrarySidebarView: View {
             let totalCount = libraryManager.searchResults.count
             selectedFilterItem = LibraryFilterItem.allItem(for: selectedFilterType, totalCount: totalCount)
         } else {
-            // Regular filter item - calculate actual count based on current search
-            let tracksToFilter = libraryManager.searchResults
-            let matchingTracks = tracksToFilter.filter { track in
-                selectedFilterType.trackMatches(track, filterValue: item.filterName)
-            }
-
-            selectedFilterItem = LibraryFilterItem(
+            selectedFilterItem = resolvedFilterItem(for: item) ?? LibraryFilterItem(
                 name: item.filterName,
-                count: matchingTracks.count,
+                count: 0,
                 filterType: selectedFilterType
             )
         }
@@ -253,11 +247,91 @@ struct LibrarySidebarView: View {
 
         // Apply custom sorting
         filteredItems = sortItemsWithUnknownLast(items)
+        synchronizeSelectionWithAvailableItems()
+    }
+
+    private func synchronizeSelectionWithAvailableItems() {
+        if !libraryManager.globalSearchText.isEmpty {
+            let totalCount = libraryManager.searchResults.count
+            let allItem = LibraryFilterItem.allItem(for: selectedFilterType, totalCount: totalCount)
+            if !matchesSelection(selectedFilterItem, allItem) {
+                selectedFilterItem = allItem
+            }
+
+            let sidebarAllItem = LibrarySidebarItem(allItemFor: selectedFilterType, count: totalCount)
+            if selectedSidebarItem?.id != sidebarAllItem.id {
+                selectedSidebarItem = sidebarAllItem
+            }
+            return
+        }
+
+        guard !filteredItems.isEmpty else {
+            if selectedFilterItem != nil {
+                selectedFilterItem = nil
+            }
+            if selectedSidebarItem != nil {
+                selectedSidebarItem = nil
+            }
+            return
+        }
+
+        guard let currentSelection = selectedFilterItem, !currentSelection.isAllItem else {
+            let firstItem = filteredItems[0]
+            if !matchesSelection(selectedFilterItem, firstItem) {
+                selectedFilterItem = firstItem
+            }
+            if selectedSidebarItem?.filterName != firstItem.name {
+                selectedSidebarItem = LibrarySidebarItem(filterItem: firstItem)
+            }
+            return
+        }
+
+        guard isValidFilterItem(currentSelection) else {
+            let firstItem = filteredItems[0]
+            if !matchesSelection(selectedFilterItem, firstItem) {
+                selectedFilterItem = firstItem
+            }
+            if selectedSidebarItem?.filterName != firstItem.name {
+                selectedSidebarItem = LibrarySidebarItem(filterItem: firstItem)
+            }
+            return
+        }
+
+        if selectedSidebarItem?.filterName != currentSelection.name {
+            selectedSidebarItem = LibrarySidebarItem(filterItem: currentSelection)
+        }
+    }
+
+    private func matchesSelection(_ lhs: LibraryFilterItem?, _ rhs: LibraryFilterItem) -> Bool {
+        guard let lhs else { return false }
+        return lhs.name == rhs.name
+            && lhs.filterType == rhs.filterType
+            && lhs.isAllItem == rhs.isAllItem
+    }
+
+    private func resolvedFilterItem(for item: LibrarySidebarItem) -> LibraryFilterItem? {
+        let matchesName: (LibraryFilterItem) -> Bool = { candidate in
+            if selectedFilterType.usesMultiArtistParsing {
+                return ArtistParser.normalizeArtistName(candidate.name) == ArtistParser.normalizeArtistName(item.filterName)
+            }
+            return candidate.name == item.filterName
+        }
+
+        if let currentItem = filteredItems.first(where: matchesName) {
+            return currentItem
+        }
+
+        return getFilterItems(for: selectedFilterType).first(where: matchesName)
     }
 
     private func isValidFilterItem(_ item: LibraryFilterItem) -> Bool {
         // Check if this filter item exists in the current (non-searched) data
         let allItems = getFilterItems(for: selectedFilterType)
+        if selectedFilterType.usesMultiArtistParsing {
+            return allItems.contains {
+                ArtistParser.normalizeArtistName($0.name) == ArtistParser.normalizeArtistName(item.name)
+            }
+        }
         return allItems.contains { $0.name == item.name }
     }
 

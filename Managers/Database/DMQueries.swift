@@ -106,6 +106,120 @@ extension DatabaseManager {
             return []
         }
     }
+
+    func getAllTracksPage(
+        limit: Int = DatabaseConstants.trackListPageSize,
+        offset: Int = 0,
+        sortField: TrackSortField = .title,
+        ascending: Bool = true
+    ) -> [Track] {
+        do {
+            var tracks = try dbQueue.read { db in
+                let request = orderedTrackRequest(
+                    Track.lightweightRequest(),
+                    sortField: sortField,
+                    ascending: ascending
+                )
+
+                return try request
+                    .limit(limit, offset: offset)
+                    .fetchAll(db)
+            }
+
+            populateAlbumArtworkForTracks(&tracks)
+            return tracks
+        } catch {
+            Logger.error("Failed to fetch paged tracks: \(error)")
+            return []
+        }
+    }
+
+    func getTracksPage(
+        filterType: LibraryFilterType,
+        value: String,
+        limit: Int = DatabaseConstants.trackListPageSize,
+        offset: Int = 0,
+        sortField: TrackSortField = .title,
+        ascending: Bool = true
+    ) -> [Track] {
+        do {
+            var tracks = try dbQueue.read { db in
+                var request = Track.lightweightRequest()
+
+                switch filterType {
+                case .artists, .albumArtists, .composers:
+                    if value == filterType.unknownPlaceholder {
+                        switch filterType {
+                        case .artists:
+                            request = request.filter(Track.Columns.artist == value)
+                        case .albumArtists:
+                            request = request.filter(Track.Columns.albumArtist == value)
+                        case .composers:
+                            request = request.filter(Track.Columns.composer == value)
+                        default:
+                            break
+                        }
+                    } else {
+                        let normalizedSearchName = ArtistParser.normalizeArtistName(value)
+                        guard let artist = try Artist
+                            .filter((Artist.Columns.name == value) || (Artist.Columns.normalizedName == normalizedSearchName))
+                            .fetchOne(db),
+                              let artistId = artist.id,
+                              let role = trackArtistRole(for: filterType) else {
+                            return [Track]()
+                        }
+
+                        let trackIds = try TrackArtist
+                            .filter(TrackArtist.Columns.artistId == artistId)
+                            .filter(TrackArtist.Columns.role == role)
+                            .select(TrackArtist.Columns.trackId, as: Int64.self)
+                            .fetchAll(db)
+
+                        guard !trackIds.isEmpty else {
+                            return [Track]()
+                        }
+
+                        request = request.filter(trackIds.contains(Track.Columns.trackId))
+                    }
+
+                case .albums:
+                    request = request.filter(Track.Columns.album == value)
+
+                case .genres:
+                    request = request.filter(Track.Columns.genre == value)
+
+                case .years:
+                    request = request.filter(Track.Columns.year == value)
+
+                case .decades:
+                    let decade = value.replacingOccurrences(of: "s", with: "")
+                    guard let decadeInt = Int(decade) else {
+                        return [Track]()
+                    }
+
+                    let startYear = String(decadeInt)
+                    let endYear = String(decadeInt + 9)
+                    request = request.filter(Track.Columns.year >= startYear && Track.Columns.year <= endYear)
+                }
+
+                request = orderedTrackRequest(
+                    request,
+                    sortField: sortField,
+                    ascending: ascending
+                )
+
+                return try request
+                    .limit(limit, offset: offset)
+                    .fetchAll(db)
+            }
+
+            populateAlbumArtworkForTracks(&tracks)
+            return tracks
+        } catch {
+            Logger.error("Failed to fetch paged tracks for \(filterType) '\(value)': \(error)")
+            return []
+        }
+    }
     
     /// Get total track count without loading tracks
     func getTotalTrackCount() -> Int {
@@ -681,6 +795,108 @@ extension DatabaseManager {
                let artwork = artworkMap[trackId] {
                 tracks[i].albumArtworkData = artwork
             }
+        }
+    }
+}
+
+private extension DatabaseManager {
+    func orderedTrackRequest(
+        _ request: QueryInterfaceRequest<Track>,
+        sortField: TrackSortField,
+        ascending: Bool
+    ) -> QueryInterfaceRequest<Track> {
+        switch sortField {
+        case .trackNumber:
+            return request.order(
+                ascending ? Track.Columns.discNumber.asc : Track.Columns.discNumber.desc,
+                ascending ? Track.Columns.trackNumber.asc : Track.Columns.trackNumber.desc,
+                ascending ? Track.Columns.title.asc : Track.Columns.title.desc
+            )
+
+        case .discNumber:
+            return request.order(
+                ascending ? Track.Columns.discNumber.asc : Track.Columns.discNumber.desc,
+                ascending ? Track.Columns.trackNumber.asc : Track.Columns.trackNumber.desc,
+                ascending ? Track.Columns.title.asc : Track.Columns.title.desc
+            )
+
+        case .favorite:
+            return request.order(
+                ascending ? Track.Columns.isFavorite.asc : Track.Columns.isFavorite.desc,
+                ascending ? Track.Columns.title.asc : Track.Columns.title.desc
+            )
+
+        case .title:
+            return request.order(
+                ascending ? Track.Columns.title.asc : Track.Columns.title.desc,
+                ascending ? Track.Columns.trackId.asc : Track.Columns.trackId.desc
+            )
+
+        case .artist:
+            return request.order(
+                ascending ? Track.Columns.artist.asc : Track.Columns.artist.desc,
+                ascending ? Track.Columns.album.asc : Track.Columns.album.desc,
+                ascending ? Track.Columns.title.asc : Track.Columns.title.desc
+            )
+
+        case .album:
+            return request.order(
+                ascending ? Track.Columns.album.asc : Track.Columns.album.desc,
+                ascending ? Track.Columns.discNumber.asc : Track.Columns.discNumber.desc,
+                ascending ? Track.Columns.trackNumber.asc : Track.Columns.trackNumber.desc,
+                ascending ? Track.Columns.title.asc : Track.Columns.title.desc
+            )
+
+        case .genre:
+            return request.order(
+                ascending ? Track.Columns.genre.asc : Track.Columns.genre.desc,
+                ascending ? Track.Columns.artist.asc : Track.Columns.artist.desc,
+                ascending ? Track.Columns.title.asc : Track.Columns.title.desc
+            )
+
+        case .year:
+            return request.order(
+                ascending ? Track.Columns.year.asc : Track.Columns.year.desc,
+                ascending ? Track.Columns.album.asc : Track.Columns.album.desc,
+                ascending ? Track.Columns.trackNumber.asc : Track.Columns.trackNumber.desc
+            )
+
+        case .composer:
+            return request.order(
+                ascending ? Track.Columns.composer.asc : Track.Columns.composer.desc,
+                ascending ? Track.Columns.title.asc : Track.Columns.title.desc
+            )
+
+        case .filename:
+            return request.order(
+                ascending ? Track.Columns.filename.asc : Track.Columns.filename.desc,
+                ascending ? Track.Columns.trackId.asc : Track.Columns.trackId.desc
+            )
+
+        case .duration:
+            return request.order(
+                ascending ? Track.Columns.duration.asc : Track.Columns.duration.desc,
+                ascending ? Track.Columns.title.asc : Track.Columns.title.desc
+            )
+
+        case .dateAdded, .custom:
+            return request.order(
+                ascending ? Track.Columns.dateAdded.asc : Track.Columns.dateAdded.desc,
+                ascending ? Track.Columns.title.asc : Track.Columns.title.desc
+            )
+        }
+    }
+
+    func trackArtistRole(for filterType: LibraryFilterType) -> String? {
+        switch filterType {
+        case .artists:
+            return TrackArtist.Role.artist
+        case .albumArtists:
+            return TrackArtist.Role.albumArtist
+        case .composers:
+            return TrackArtist.Role.composer
+        default:
+            return nil
         }
     }
 }

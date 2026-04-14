@@ -27,8 +27,20 @@ extension DatabaseManager {
 
     func deleteDataSource(_ sourceId: UUID) async throws {
         try await dbQueue.write { db in
+            let sourceIdString = sourceId.uuidString
+            let trackIds = try Track
+                .filter(Track.Columns.sourceId == sourceIdString)
+                .select(Track.Columns.trackId, as: Int64.self)
+                .fetchAll(db)
+
+            try deleteTracks(withRowIDs: trackIds, in: db)
+
+            _ = try EmbyFavoriteCacheEntry
+                .filter(EmbyFavoriteCacheEntry.Columns.sourceId == sourceIdString)
+                .deleteAll(db)
+
             _ = try LibraryDataSource
-                .filter(LibraryDataSource.Columns.id == sourceId.uuidString)
+                .filter(LibraryDataSource.Columns.id == sourceIdString)
                 .deleteAll(db)
         }
 
@@ -88,29 +100,15 @@ extension DatabaseManager {
     }
 
     func replaceTracks(for source: LibraryDataSource, tracks: [FullTrack]) async throws {
+        let retainedTrackKeys = try await upsertTracksPage(for: source, tracks: tracks)
+        try await deleteRemoteTracks(for: source, retaining: retainedTrackKeys)
+    }
+
+    func upsertTracksPage(for source: LibraryDataSource, tracks: [FullTrack]) async throws -> Set<String> {
         try await dbQueue.write { db in
             let cache = ScanLookupCache()
             let sourceId = source.id.uuidString
-            let existingTrackRows = try Row.fetchAll(
-                db,
-                sql: """
-                    SELECT id, path, remote_item_id
-                    FROM tracks
-                    WHERE source_id = ?
-                    """,
-                arguments: [sourceId]
-            )
-            let existingTrackKeys = existingTrackRows.compactMap { row -> (String, Int64)? in
-                let trackId: Int64 = row["id"]
-                let resourceLocator: String = row["path"]
-                let remoteItemId: String? = row["remote_item_id"]
-                return (stableRemoteTrackKey(
-                    sourceId: sourceId,
-                    remoteItemId: remoteItemId,
-                    resourceLocator: resourceLocator
-                ), trackId)
-            }
-            let existingTrackIdsByKey = Dictionary(uniqueKeysWithValues: existingTrackKeys)
+            let existingTrackIdsByKey = try existingRemoteTrackIdsByKey(for: sourceId, in: db)
 
             var retainedTrackKeys = Set<String>()
             var trackArtworkByTrackId: [Int64: Data] = [:]
@@ -140,20 +138,24 @@ extension DatabaseManager {
                 )
             }
 
-            let staleTrackIds = existingTrackKeys.compactMap { trackKey, trackId in
-                retainedTrackKeys.contains(trackKey) ? nil : trackId
-            }
-            for chunk in staleTrackIds.chunked(into: 400) {
-                _ = try Track
-                    .filter(chunk.contains(Track.Columns.trackId))
-                    .deleteAll(db)
-            }
-
             try applyArtworkCandidates(
                 trackArtworkByTrackId: trackArtworkByTrackId,
                 albumArtworkByAlbumId: albumArtworkByAlbumId,
                 in: db
             )
+            try updateEntityStats(in: db)
+            return retainedTrackKeys
+        }
+    }
+
+    func deleteRemoteTracks(for source: LibraryDataSource, retaining retainedTrackKeys: Set<String>) async throws {
+        try await dbQueue.write { db in
+            let existingTrackIdsByKey = try existingRemoteTrackIdsByKey(for: source.id.uuidString, in: db)
+            let staleTrackIds = existingTrackIdsByKey.compactMap { trackKey, trackId in
+                retainedTrackKeys.contains(trackKey) ? nil : trackId
+            }
+
+            try deleteTracks(withRowIDs: staleTrackIds, in: db)
             try updateEntityStats(in: db)
         }
 
@@ -283,6 +285,31 @@ extension DatabaseManager {
 }
 
 private extension DatabaseManager {
+    func existingRemoteTrackIdsByKey(for sourceId: String, in db: Database) throws -> [String: Int64] {
+        let existingTrackRows = try Row.fetchAll(
+            db,
+            sql: """
+                SELECT id, path, remote_item_id
+                FROM tracks
+                WHERE source_id = ?
+                """,
+            arguments: [sourceId]
+        )
+
+        let existingTrackKeys = existingTrackRows.compactMap { row -> (String, Int64)? in
+            let trackId: Int64 = row["id"]
+            let resourceLocator: String = row["path"]
+            let remoteItemId: String? = row["remote_item_id"]
+            return (stableRemoteTrackKey(
+                sourceId: sourceId,
+                remoteItemId: remoteItemId,
+                resourceLocator: resourceLocator
+            ), trackId)
+        }
+
+        return Dictionary(uniqueKeysWithValues: existingTrackKeys)
+    }
+
     func stableRemoteTrackKey(sourceId: String, remoteItemId: String?, resourceLocator: String) -> String {
         if let remoteItemId, !remoteItemId.isEmpty {
             return "item:\(sourceId):\(remoteItemId)"
@@ -418,9 +445,12 @@ private extension DatabaseManager {
             track.genre = genre
         }
 
-        if let productionYear = item.productionYear,
+        if let resolvedYear = MetadataYearResolver.resolvedYear(
+            primaryYear: item.productionYear.map(String.init),
+            releaseDate: item.premiereDate
+        ),
            (track.year.isEmpty || track.year == "Unknown Year") {
-            track.year = String(productionYear)
+            track.year = resolvedYear
         }
 
         if track.trackNumber == nil, let indexNumber = item.indexNumber {

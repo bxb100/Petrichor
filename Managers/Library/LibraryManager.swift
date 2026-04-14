@@ -132,11 +132,6 @@ class LibraryManager: ObservableObject {
             ArtistBioManager.shared.fetchMissingArtistImages(using: self)
         }
 
-        Task {
-            try? await Task.sleep(nanoseconds: TimeConstants.fiftyMilliseconds)
-            await syncRemoteSourcesOnLaunch()
-        }
-
         // Observe auto-scan interval changes
         NotificationCenter.default.addObserver(
             self,

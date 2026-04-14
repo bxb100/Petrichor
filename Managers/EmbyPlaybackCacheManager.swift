@@ -25,25 +25,15 @@ actor EmbyPlaybackCacheManager {
             return destinationURL
         }
 
-        if let existingTask = activeDownloads[key] {
-            return try await existingTask.value
-        }
-
-        let task = Task<URL, Error> {
-            try await service.downloadAudio(
-                source: source,
-                session: session,
-                track: track,
-                destinationURL: destinationURL
-            )
-        }
-        activeDownloads[key] = task
-
-        defer {
-            activeDownloads[key] = nil
-        }
-
-        return try await task.value
+        _ = downloadTask(
+            key: key,
+            track: track,
+            source: source,
+            session: session,
+            service: service,
+            destinationURL: destinationURL
+        )
+        return try await service.makePlaybackURL(source: source, session: session, track: track)
     }
 
     func prefetch(
@@ -55,7 +45,7 @@ actor EmbyPlaybackCacheManager {
         let key = cacheKey(for: track)
         let destinationURL = cachedFileURL(for: track)
 
-        if fileManager.fileExists(atPath: destinationURL.path) || activeDownloads[key] != nil {
+        if fileManager.fileExists(atPath: destinationURL.path) {
             return
         }
 
@@ -66,20 +56,14 @@ actor EmbyPlaybackCacheManager {
             return
         }
 
-        let task = Task<URL, Error> {
-            try await service.downloadAudio(
-                source: source,
-                session: session,
-                track: track,
-                destinationURL: destinationURL
-            )
-        }
-        activeDownloads[key] = task
-
-        Task {
-            _ = try? await task.value
-            clearActiveDownload(for: key)
-        }
+        _ = downloadTask(
+            key: key,
+            track: track,
+            source: source,
+            session: session,
+            service: service,
+            destinationURL: destinationURL
+        )
     }
 
     func trimCache(keeping tracks: [Track]) async {
@@ -118,7 +102,41 @@ actor EmbyPlaybackCacheManager {
         try fileManager.createDirectory(at: cacheDirectoryURL, withIntermediateDirectories: true)
     }
 
-    private func clearActiveDownload(for key: String) {
+    private func downloadTask(
+        key: String,
+        track: Track,
+        source: LibraryDataSource,
+        session: EmbySession,
+        service: EmbyService,
+        destinationURL: URL
+    ) -> Task<URL, Error> {
+        if fileManager.fileExists(atPath: destinationURL.path) {
+            return Task { destinationURL }
+        }
+
+        if let activeTask = activeDownloads[key] {
+            return activeTask
+        }
+
+        let task = Task<URL, Error> {
+            try await service.downloadAudio(
+                source: source,
+                session: session,
+                track: track,
+                destinationURL: destinationURL
+            )
+        }
+        activeDownloads[key] = task
+
+        Task {
+            _ = try? await task.value
+            await self.clearActiveDownload(for: key)
+        }
+
+        return task
+    }
+
+    private func clearActiveDownload(for key: String) async {
         activeDownloads[key] = nil
     }
 }

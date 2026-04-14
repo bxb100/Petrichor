@@ -1,6 +1,7 @@
 import AVFoundation
 import Foundation
 import SFBAudioEngine
+import VLCKitSPM
 
 typealias SFBPlayer = SFBAudioEngine.AudioPlayer
 typealias SFBPlayerPlaybackState = SFBAudioEngine.AudioPlayer.PlaybackState
@@ -90,6 +91,10 @@ public extension AudioPlayerDelegate {
 // MARK: - PAudioPlayer
 
 public class PAudioPlayer: NSObject {
+    private enum PlaybackBackend {
+        case local
+        case remote
+    }
     
     // MARK: - Public Properties
     
@@ -97,14 +102,18 @@ public class PAudioPlayer: NSObject {
     
     public var volume: Float {
         get {
-            return sfbPlayer.volume
+            currentVolume
         }
         set {
+            currentVolume = newValue
+
             do {
                 try sfbPlayer.setVolume(newValue)
             } catch {
                 Logger.error("Failed to set volume: \(error)")
             }
+
+            applyRemoteVolume()
         }
     }
     
@@ -120,12 +129,22 @@ public class PAudioPlayer: NSObject {
     
     /// Current playback progress in seconds
     public var currentPlaybackProgress: Double {
-        sfbPlayer.currentTime ?? 0
+        switch activeBackend {
+        case .local:
+            return sfbPlayer.currentTime ?? 0
+        case .remote:
+            return sanitizedSeconds(from: remotePlayer?.time)
+        }
     }
     
     /// Total duration of current file in seconds
     public var duration: Double {
-        sfbPlayer.totalTime ?? 0
+        switch activeBackend {
+        case .local:
+            return sfbPlayer.totalTime ?? 0
+        case .remote:
+            return sanitizedSeconds(from: remotePlayer?.media?.length)
+        }
     }
     
     /// Legacy property name for backwards compatibility
@@ -136,11 +155,18 @@ public class PAudioPlayer: NSObject {
     // MARK: - Private Properties
     
     private let sfbPlayer: SFBPlayer
+    private var activeBackend: PlaybackBackend = .local
     private var currentEntryId: AudioEntryId?
     private var currentURL: URL?
     private var delegateBridge: SFBAudioPlayerDelegateBridge?
     private var pauseWhenPlaybackStarts = false
+    private var currentVolume: Float = 1.0
     private static let maxPreBufferSize: UInt64 = 100 * 1024 * 1024
+
+    private var remotePlayer: VLCMediaPlayer?
+    private var remoteDelegateBridge: VLCMediaPlayerDelegateBridge?
+    private var remoteDidStartPlaying = false
+    private var remoteStopInProgress = false
     
     // MARK: - Audio Effects Nodes
 
@@ -170,6 +196,8 @@ public class PAudioPlayer: NSObject {
     }
     
     deinit {
+        remotePlayer?.stop()
+        remotePlayer?.delegate = nil
         sfbPlayer.stop()
     }
     
@@ -181,75 +209,18 @@ public class PAudioPlayer: NSObject {
     ///   - startPaused: If true, loads the file but doesn't start playback
     public func play(url: URL, startPaused: Bool = false) {
         currentURL = url
-        let entryId = AudioEntryId(id: url.lastPathComponent)
+        let entryId = AudioEntryId(id: url.isFileURL ? url.lastPathComponent : url.path)
         currentEntryId = entryId
         pauseWhenPlaybackStarts = startPaused
-        
-        let shouldPreBuffer = Self.shouldPreBuffer(url: url)
-        
-        if shouldPreBuffer {
-            state = .ready
-            
-            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-                guard let self = self else { return }
-                
-                do {
-                    let inputSource = try InputSource(for: url, flags: .loadFilesInMemory)
-                    let decoder = try AudioDecoder(inputSource: inputSource)
-                    
-                    try self.sfbPlayer.play(decoder)
-                    
-                    DispatchQueue.main.async {
-                        if !startPaused {
-                            self.state = .playing
-                        }
-                        Logger.info(
-                            startPaused
-                                ? "Prepared playback (pre-buffered): \(url.lastPathComponent)"
-                                : "Started playing (pre-buffered): \(url.lastPathComponent)"
-                        )
-                    }
-                } catch {
-                    Logger.warning("Pre-buffering failed, falling back to direct playback: \(error.localizedDescription)")
-                    
-                    do {
-                        try self.sfbPlayer.play(url)
-                        
-                        DispatchQueue.main.async {
-                            if !startPaused {
-                                self.state = .playing
-                            }
-                            Logger.info(
-                                startPaused
-                                    ? "Prepared playback (direct fallback): \(url.lastPathComponent)"
-                                    : "Started playing (direct fallback): \(url.lastPathComponent)"
-                            )
-                        }
-                    } catch {
-                        DispatchQueue.main.async {
-                            self.handlePlaybackError(error, entryId: entryId)
-                        }
-                    }
-                }
-            }
+
+        if url.isFileURL {
+            activeBackend = .local
+            teardownRemotePlayback()
+            playLocal(url: url, startPaused: startPaused, entryId: entryId)
         } else {
-            do {
-                try sfbPlayer.play(url)
-                
-                if startPaused {
-                    state = .ready
-                } else {
-                    state = .playing
-                }
-                
-                Logger.info(
-                    startPaused
-                        ? "Prepared playback: \(url.lastPathComponent)"
-                        : "Started playing: \(url.lastPathComponent)"
-                )
-            } catch {
-                handlePlaybackError(error, entryId: entryId)
-            }
+            activeBackend = .remote
+            sfbPlayer.stop()
+            playRemote(url: url, startPaused: startPaused, entryId: entryId)
         }
     }
     
@@ -257,8 +228,16 @@ public class PAudioPlayer: NSObject {
     public func pause() {
         guard state == .playing else { return }
         pauseWhenPlaybackStarts = false
-        sfbPlayer.pause()
-        state = .paused
+
+        switch activeBackend {
+        case .local:
+            sfbPlayer.pause()
+            state = .paused
+        case .remote:
+            remotePlayer?.pause()
+            state = .paused
+        }
+
         Logger.info("Playback paused")
     }
     
@@ -266,65 +245,64 @@ public class PAudioPlayer: NSObject {
     public func resume() {
         guard state == .paused else { return }
         pauseWhenPlaybackStarts = false
-        
-        do {
-            try sfbPlayer.play()
-            state = .playing
-            Logger.info("Playback resumed")
-        } catch {
-            Logger.error("Failed to resume playback: \(error)")
-            delegate?.audioPlayerUnexpectedError(player: self, error: .engineError(error))
+
+        switch activeBackend {
+        case .local:
+            do {
+                try sfbPlayer.play()
+                state = .playing
+                Logger.info("Playback resumed")
+            } catch {
+                Logger.error("Failed to resume playback: \(error)")
+                delegate?.audioPlayerUnexpectedError(player: self, error: .engineError(error))
+            }
+        case .remote:
+            remotePlayer?.play()
+            if state != .playing {
+                state = .ready
+            }
+            Logger.info("Remote playback resumed")
         }
     }
     
     /// Stop playback
     public func stop() {
         guard state != .stopped else { return }
-        pauseWhenPlaybackStarts = false
-        
-        let wasPlaying = state == .playing
-        let currentProgress = currentPlaybackProgress
-        let currentDuration = duration
-        let entryId = currentEntryId
-        
-        sfbPlayer.stop()
-        state = .stopped
-        
-        if wasPlaying, let entryId = entryId {
-            delegate?.audioPlayerDidFinishPlaying(
-                player: self,
-                entryId: entryId,
-                stopReason: .userAction,
-                progress: currentProgress,
-                duration: currentDuration
-            )
+        switch activeBackend {
+        case .local:
+            stopLocalPlayback(notifyFinish: true)
+        case .remote:
+            stopRemotePlayback(notifyFinish: true)
         }
-        
-        currentURL = nil
-        currentEntryId = nil
-        
-        Logger.info("Playback stopped")
     }
     
     /// Toggle between play and pause
     public func togglePlayPause() {
-        do {
-            try sfbPlayer.togglePlayPause()
-            
-            // Update state based on current playback state
-            switch sfbPlayer.playbackState {
-            case .playing:
-                state = .playing
-            case .paused:
-                state = .paused
-            case .stopped:
-                state = .stopped
-            @unknown default:
-                break
+        switch activeBackend {
+        case .local:
+            do {
+                try sfbPlayer.togglePlayPause()
+
+                switch sfbPlayer.playbackState {
+                case .playing:
+                    state = .playing
+                case .paused:
+                    state = .paused
+                case .stopped:
+                    state = .stopped
+                @unknown default:
+                    break
+                }
+            } catch {
+                Logger.error("Failed to toggle play/pause: \(error)")
+                delegate?.audioPlayerUnexpectedError(player: self, error: .engineError(error))
             }
-        } catch {
-            Logger.error("Failed to toggle play/pause: \(error)")
-            delegate?.audioPlayerUnexpectedError(player: self, error: .engineError(error))
+        case .remote:
+            if state == .playing {
+                pause()
+            } else if state == .paused || state == .ready {
+                resume()
+            }
         }
     }
     
@@ -334,15 +312,26 @@ public class PAudioPlayer: NSObject {
     @discardableResult
     public func seek(to time: Double) -> Bool {
         guard time >= 0 else { return false }
-        
-        let success = sfbPlayer.seek(time: time)
-        
-        if !success {
-            Logger.error("Failed to seek to time: \(time)")
-            delegate?.audioPlayerUnexpectedError(player: self, error: .seekError)
+
+        switch activeBackend {
+        case .local:
+            let success = sfbPlayer.seek(time: time)
+
+            if !success {
+                Logger.error("Failed to seek to time: \(time)")
+                delegate?.audioPlayerUnexpectedError(player: self, error: .seekError)
+            }
+
+            return success
+        case .remote:
+            guard let remotePlayer, remotePlayer.isSeekable else { return false }
+            let currentDuration = duration
+            guard currentDuration > 0 else { return false }
+
+            let normalizedPosition = Float(min(max(time / currentDuration, 0), 1))
+            remotePlayer.position = normalizedPosition
+            return true
         }
-        
-        return success
     }
     
     /// Seek forward by a number of seconds
@@ -350,7 +339,12 @@ public class PAudioPlayer: NSObject {
     /// - Returns: true if seek was successful
     @discardableResult
     public func seekForward(_ seconds: Double) -> Bool {
-        return sfbPlayer.seek(forward: seconds)
+        switch activeBackend {
+        case .local:
+            return sfbPlayer.seek(forward: seconds)
+        case .remote:
+            return seek(to: currentPlaybackProgress + seconds)
+        }
     }
     
     /// Seek backward by a number of seconds
@@ -358,7 +352,12 @@ public class PAudioPlayer: NSObject {
     /// - Returns: true if seek was successful
     @discardableResult
     public func seekBackward(_ seconds: Double) -> Bool {
-        return sfbPlayer.seek(backward: seconds)
+        switch activeBackend {
+        case .local:
+            return sfbPlayer.seek(backward: seconds)
+        case .remote:
+            return seek(to: max(0, currentPlaybackProgress - seconds))
+        }
     }
     
     // MARK: - Audio Equalizer
@@ -470,6 +469,8 @@ public class PAudioPlayer: NSObject {
     // MARK: - Internal Methods (called by delegate bridge)
     
     internal func handlePlaybackStateChanged(_ newState: SFBPlayerPlaybackState) {
+        guard activeBackend == .local else { return }
+
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
             
@@ -504,6 +505,8 @@ public class PAudioPlayer: NSObject {
     }
     
     internal func handleEndOfAudio() {
+        guard activeBackend == .local else { return }
+
         let finalProgress = currentPlaybackProgress
         let finalDuration = duration
         
@@ -566,9 +569,76 @@ public class PAudioPlayer: NSObject {
     }
     
     internal func handleError(_ error: Error) {
+        guard activeBackend == .local else { return }
+
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
             self.delegate?.audioPlayerUnexpectedError(player: self, error: .engineError(error))
+        }
+    }
+
+    internal func handleRemoteStateChanged() {
+        guard activeBackend == .remote else { return }
+
+        DispatchQueue.main.async { [weak self] in
+            guard let self, let remotePlayer = self.remotePlayer else { return }
+
+            self.applyRemoteVolume()
+
+            switch remotePlayer.state {
+            case .opening, .buffering, .esAdded:
+                guard self.state != .paused, self.state != .stopped else { return }
+                if self.state != .ready {
+                    self.state = .ready
+                }
+            case .playing:
+                if self.pauseWhenPlaybackStarts {
+                    self.pauseWhenPlaybackStarts = false
+                    remotePlayer.pause()
+                    self.state = .paused
+                    Logger.info("Remote playback primed in paused state")
+                    return
+                }
+
+                if self.state != .playing {
+                    self.state = .playing
+                }
+
+                if !self.remoteDidStartPlaying, let entryId = self.currentEntryId {
+                    self.remoteDidStartPlaying = true
+                    self.delegate?.audioPlayerDidStartPlaying(player: self, with: entryId)
+                }
+            case .paused:
+                guard self.state != .stopped else { return }
+                if self.state != .paused {
+                    self.state = .paused
+                }
+            case .ended:
+                guard !self.remoteStopInProgress else { return }
+                self.handleRemotePlaybackEnded()
+            case .error:
+                guard !self.remoteStopInProgress else { return }
+                Logger.error("Remote player entered error state for \(self.redactedURLString(self.currentURL))")
+                self.handleRemotePlaybackFailure(AudioPlayerError.invalidFormat)
+            case .stopped:
+                if self.remoteStopInProgress {
+                    return
+                }
+                Logger.warning("Remote player stopped unexpectedly for \(self.redactedURLString(self.currentURL))")
+                if self.state != .stopped {
+                    self.state = .stopped
+                }
+            @unknown default:
+                break
+            }
+        }
+    }
+
+    internal func handleRemoteTimeChanged() {
+        guard activeBackend == .remote else { return }
+
+        DispatchQueue.main.async { [weak self] in
+            self?.applyRemoteVolume()
         }
     }
     
@@ -595,13 +665,243 @@ public class PAudioPlayer: NSObject {
         
         return false
     }
+
+    private func playLocal(url: URL, startPaused: Bool, entryId: AudioEntryId) {
+        let shouldPreBuffer = Self.shouldPreBuffer(url: url)
+
+        if shouldPreBuffer {
+            state = .ready
+
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                guard let self = self else { return }
+
+                do {
+                    let inputSource = try InputSource(for: url, flags: .loadFilesInMemory)
+                    let decoder = try AudioDecoder(inputSource: inputSource)
+
+                    try self.sfbPlayer.play(decoder)
+
+                    DispatchQueue.main.async {
+                        if !startPaused {
+                            self.state = .playing
+                        }
+                        Logger.info(
+                            startPaused
+                                ? "Prepared playback (pre-buffered): \(url.lastPathComponent)"
+                                : "Started playing (pre-buffered): \(url.lastPathComponent)"
+                        )
+                    }
+                } catch {
+                    Logger.warning("Pre-buffering failed, falling back to direct playback: \(error.localizedDescription)")
+
+                    do {
+                        try self.sfbPlayer.play(url)
+
+                        DispatchQueue.main.async {
+                            if !startPaused {
+                                self.state = .playing
+                            }
+                            Logger.info(
+                                startPaused
+                                    ? "Prepared playback (direct fallback): \(url.lastPathComponent)"
+                                    : "Started playing (direct fallback): \(url.lastPathComponent)"
+                            )
+                        }
+                    } catch {
+                        DispatchQueue.main.async {
+                            self.handlePlaybackError(error, entryId: entryId)
+                        }
+                    }
+                }
+            }
+        } else {
+            do {
+                try sfbPlayer.play(url)
+
+                if startPaused {
+                    state = .ready
+                } else {
+                    state = .playing
+                }
+
+                Logger.info(
+                    startPaused
+                        ? "Prepared playback: \(url.lastPathComponent)"
+                        : "Started playing: \(url.lastPathComponent)"
+                )
+            } catch {
+                handlePlaybackError(error, entryId: entryId)
+            }
+        }
+    }
+
+    private func playRemote(url: URL, startPaused: Bool, entryId: AudioEntryId) {
+        teardownRemotePlayback()
+
+        let player = remotePlayer ?? VLCMediaPlayer()
+        if remoteDelegateBridge == nil {
+            remoteDelegateBridge = VLCMediaPlayerDelegateBridge(owner: self)
+        }
+        player.delegate = remoteDelegateBridge
+
+        let media = VLCMedia(url: url)
+        media.addOption(":no-video")
+        media.addOption(":network-caching=300")
+        media.addOption(":live-caching=300")
+        media.addOption(":clock-jitter=0")
+        media.addOption(":clock-synchro=0")
+
+        remotePlayer = player
+        remoteDidStartPlaying = false
+        remoteStopInProgress = false
+
+        player.media = media
+        applyRemoteVolume()
+        state = .ready
+        player.play()
+
+        Logger.info(
+            startPaused
+                ? "Preparing remote stream: \(redactedURLString(url))"
+                : "Started remote stream: \(redactedURLString(url))"
+        )
+    }
+
+    private func handleRemotePlaybackEnded() {
+        let finalProgress = currentPlaybackProgress
+        let finalDuration = duration
+        let entryId = currentEntryId
+
+        teardownRemotePlayback()
+        state = .stopped
+        currentURL = nil
+        currentEntryId = nil
+
+        if let entryId {
+            delegate?.audioPlayerDidFinishPlaying(
+                player: self,
+                entryId: entryId,
+                stopReason: .eof,
+                progress: finalProgress,
+                duration: finalDuration
+            )
+        }
+    }
+
+    private func handleRemotePlaybackFailure(_ error: Error) {
+        let entryId = currentEntryId
+        teardownRemotePlayback()
+        state = .stopped
+        currentURL = nil
+        currentEntryId = nil
+
+        let normalizedError = normalizePlaybackError(error)
+        guard let entryId else {
+            delegate?.audioPlayerUnexpectedError(player: self, error: normalizedError)
+            return
+        }
+
+        handlePlaybackError(normalizedError, entryId: entryId)
+    }
+
+    private func stopLocalPlayback(notifyFinish: Bool) {
+        pauseWhenPlaybackStarts = false
+
+        let wasPlaying = state == .playing
+        let currentProgress = currentPlaybackProgress
+        let currentDuration = duration
+        let entryId = currentEntryId
+
+        sfbPlayer.stop()
+        state = .stopped
+
+        if notifyFinish, wasPlaying, let entryId {
+            delegate?.audioPlayerDidFinishPlaying(
+                player: self,
+                entryId: entryId,
+                stopReason: .userAction,
+                progress: currentProgress,
+                duration: currentDuration
+            )
+        }
+
+        currentURL = nil
+        currentEntryId = nil
+        Logger.info("Playback stopped")
+    }
+
+    private func stopRemotePlayback(notifyFinish: Bool) {
+        let wasPlaying = state == .playing
+        let currentProgress = currentPlaybackProgress
+        let currentDuration = duration
+        let entryId = currentEntryId
+
+        remoteStopInProgress = true
+        teardownRemotePlayback()
+        state = .stopped
+
+        if notifyFinish, wasPlaying, let entryId {
+            delegate?.audioPlayerDidFinishPlaying(
+                player: self,
+                entryId: entryId,
+                stopReason: .userAction,
+                progress: currentProgress,
+                duration: currentDuration
+            )
+        }
+
+        currentURL = nil
+        currentEntryId = nil
+        Logger.info("Remote playback stopped")
+    }
+
+    private func teardownRemotePlayback() {
+        remoteDidStartPlaying = false
+        remotePlayer?.stop()
+        remotePlayer?.media = nil
+        remotePlayer?.delegate = nil
+    }
+
+    private func sanitizedSeconds(from time: VLCTime?) -> Double {
+        guard let milliseconds = time?.value?.doubleValue else { return 0 }
+        guard milliseconds.isFinite, !milliseconds.isNaN, milliseconds >= 0 else { return 0 }
+        return milliseconds / 1000
+    }
+
+    private func applyRemoteVolume() {
+        remotePlayer?.audio?.volume = Int32(max(0, min(200, Int((currentVolume * 100).rounded()))))
+    }
+
+    private func redactedURLString(_ url: URL?) -> String {
+        guard let url else { return "<nil>" }
+        guard var components = URLComponents(url: url, resolvingAgainstBaseURL: false) else {
+            return url.absoluteString
+        }
+
+        components.queryItems = components.queryItems?.map { item in
+            let lowercasedName = item.name.lowercased()
+            if lowercasedName == "api_key" || lowercasedName == "x-emby-token" {
+                return URLQueryItem(name: item.name, value: "REDACTED")
+            }
+            return item
+        }
+
+        return components.string ?? url.absoluteString
+    }
+
+    private func normalizePlaybackError(_ error: Error) -> AudioPlayerError {
+        if let audioPlayerError = error as? AudioPlayerError {
+            return audioPlayerError
+        }
+        return .engineError(error)
+    }
     
     /// Handle playback errors
     private func handlePlaybackError(_ error: Error, entryId: AudioEntryId) {
         Logger.error("Failed to play audio: \(error)")
         state = .stopped
         
-        delegate?.audioPlayerUnexpectedError(player: self, error: .engineError(error))
+        delegate?.audioPlayerUnexpectedError(player: self, error: normalizePlaybackError(error))
         delegate?.audioPlayerDidFinishPlaying(
             player: self,
             entryId: entryId,
@@ -739,5 +1039,22 @@ private class SFBAudioPlayerDelegateBridge: NSObject, SFBAudioEngine.AudioPlayer
         with format: AVAudioFormat
     ) -> AVAudioNode {
         owner?.reconfigureAudioGraph(engine: engine, format: format) ?? engine.mainMixerNode
+    }
+}
+
+private class VLCMediaPlayerDelegateBridge: NSObject, VLCMediaPlayerDelegate {
+    weak var owner: PAudioPlayer?
+
+    init(owner: PAudioPlayer) {
+        self.owner = owner
+        super.init()
+    }
+
+    func mediaPlayerStateChanged(_ aNotification: Notification) {
+        owner?.handleRemoteStateChanged()
+    }
+
+    func mediaPlayerTimeChanged(_ aNotification: Notification) {
+        owner?.handleRemoteTimeChanged()
     }
 }

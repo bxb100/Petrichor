@@ -119,6 +119,12 @@ class MetadataExtractor {
             metadata.artworkData = externalArtwork
         }
 
+        metadata.year = MetadataYearResolver.resolvedYear(
+            primaryYear: metadata.year,
+            releaseDate: metadata.releaseDate,
+            originalReleaseDate: metadata.originalReleaseDate
+        )
+
         return metadata
     }
 
@@ -334,7 +340,7 @@ class MetadataExtractor {
 
             // Extract year from release date if year not set
             if metadata.year == nil {
-                metadata.year = extractYear(from: releaseDate)
+                metadata.year = MetadataYearResolver.extractYear(from: releaseDate)
             }
         }
 
@@ -513,8 +519,7 @@ class MetadataExtractor {
                 metadata.originalReleaseDate = stringValue
                 // Also try to extract year if not set
                 if metadata.year == nil {
-                    let extractedYear = extractYear(from: stringValue)
-                    if !extractedYear.isEmpty {
+                    if let extractedYear = MetadataYearResolver.extractYear(from: stringValue) {
                         metadata.year = extractedYear
                     }
                 }
@@ -599,26 +604,6 @@ class MetadataExtractor {
     }
 
     // MARK: - Helper Methods
-
-    /// Extract a 4-digit year from a date string
-    private static func extractYear(from dateString: String) -> String {
-        // Try to find a 4-digit year (e.g., 2024, 1999)
-        let yearPattern = #"\b(19|20)\d{2}\b"#
-
-        if let regex = try? NSRegularExpression(pattern: yearPattern),
-            let match = regex.firstMatch(
-                in: dateString,
-                range: NSRange(dateString.startIndex..., in: dateString)
-            )
-        {
-            if let range = Range(match.range, in: dateString) {
-                return String(dateString[range])
-            }
-        }
-
-        return ""
-    }
-    
     /// Extract normalized rating value on a 0-5 scale
     private static func extractRating(from rawRating: Int?) -> Int? {
         guard let raw = rawRating, raw > 0 else { return nil }

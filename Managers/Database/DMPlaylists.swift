@@ -307,6 +307,10 @@ extension DatabaseManager {
     
     func deletePlaylist(_ playlistId: UUID) async throws {
         try await dbQueue.write { db in
+            _ = try PlaylistTrack
+                .filter(PlaylistTrack.Columns.playlistId == playlistId.uuidString)
+                .deleteAll(db)
+
             // Use GRDB's model deletion
             if let playlist = try Playlist
                 .filter(Playlist.Columns.id == playlistId.uuidString)
@@ -314,6 +318,8 @@ extension DatabaseManager {
                 try playlist.delete(db)
             }
         }
+
+        try await cleanupOrphanedData()
     }
     
     /// Add a single track to a playlist without rebuilding entire playlist

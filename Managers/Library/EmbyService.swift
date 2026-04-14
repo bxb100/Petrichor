@@ -112,6 +112,7 @@ struct EmbyAudioItem: Decodable {
     let size: Int64?
     let bitrate: Int?
     let productionYear: Int?
+    let premiereDate: Date?
     let indexNumber: Int?
     let parentIndexNumber: Int?
     let genreItems: [EmbyNamedValue]?
@@ -142,6 +143,7 @@ struct EmbyAudioItem: Decodable {
         case size = "Size"
         case bitrate = "Bitrate"
         case productionYear = "ProductionYear"
+        case premiereDate = "PremiereDate"
         case indexNumber = "IndexNumber"
         case parentIndexNumber = "ParentIndexNumber"
         case genreItems = "GenreItems"
@@ -315,7 +317,7 @@ actor EmbyService {
     func fetchAllAudioItems(source: LibraryDataSource, session embySession: EmbySession) async throws -> [EmbyAudioItem] {
         var collectedItems: [EmbyAudioItem] = []
         var startIndex = 0
-        let pageSize = 200
+        let pageSize = DatabaseConstants.embySyncPageSize
 
         while true {
             let page = try await fetchAudioItemsPage(
@@ -338,7 +340,7 @@ actor EmbyService {
     func fetchFavoriteAudioItemIDs(source: LibraryDataSource, session embySession: EmbySession) async throws -> Set<String> {
         var favoriteIDs = Set<String>()
         var startIndex = 0
-        let pageSize = 200
+        let pageSize = DatabaseConstants.embySyncPageSize
 
         while true {
             let request = try makeRequest(
@@ -393,7 +395,7 @@ actor EmbyService {
                 URLQueryItem(name: "EnableImages", value: "true"),
                 URLQueryItem(name: "ImageTypeLimit", value: "1"),
                 URLQueryItem(name: "EnableImageTypes", value: "Primary"),
-                URLQueryItem(name: "Fields", value: "Genres,MediaSources,DateCreated,DateModified,Path")
+                URLQueryItem(name: "Fields", value: "Genres,MediaSources,DateCreated,DateModified,Path,PremiereDate")
             ],
             useAuthorizationHeader: true,
             userId: embySession.userId
@@ -465,24 +467,32 @@ actor EmbyService {
         return destinationURL
     }
 
+    func makePlaybackURL(source: LibraryDataSource, session embySession: EmbySession, track: Track) throws -> URL {
+        try makeStaticStreamURL(source: source, session: embySession, track: track)
+    }
+
     func makeStaticStreamURL(source: LibraryDataSource, session embySession: EmbySession, track: Track) throws -> URL {
         guard let remoteItemId = track.remoteItemId ?? TrackLocator.embyIdentifiers(from: track.url)?.itemId else {
             throw EmbyServiceError.missingRemoteItemId
         }
 
-        let container = track.format.isEmpty ? "mp3" : track.format
+        let trimmedContainer = track.format.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        var queryItems = [
+            URLQueryItem(name: "api_key", value: embySession.accessToken),
+            URLQueryItem(name: "static", value: "true")
+        ]
+        if !trimmedContainer.isEmpty {
+            queryItems.append(URLQueryItem(name: "container", value: trimmedContainer))
+        }
+
         return try buildURL(
             source: source,
             path: "/Audio/\(remoteItemId)/stream",
-            queryItems: [
-                URLQueryItem(name: "api_key", value: embySession.accessToken),
-                URLQueryItem(name: "static", value: "true"),
-                URLQueryItem(name: "container", value: container)
-            ]
+            queryItems: queryItems
         )
     }
 
-    private func fetchAudioItemsPage(
+    func fetchAudioItemsPage(
         source: LibraryDataSource,
         session embySession: EmbySession,
         startIndex: Int,
@@ -500,7 +510,7 @@ actor EmbyService {
                 URLQueryItem(name: "EnableImages", value: "true"),
                 URLQueryItem(name: "ImageTypeLimit", value: "1"),
                 URLQueryItem(name: "EnableImageTypes", value: "Primary"),
-                URLQueryItem(name: "Fields", value: "Genres,MediaSources,DateCreated,DateModified,Path"),
+                URLQueryItem(name: "Fields", value: "Genres,MediaSources,DateCreated,DateModified,Path,PremiereDate"),
                 URLQueryItem(name: "SortBy", value: "SortName"),
                 URLQueryItem(name: "StartIndex", value: String(startIndex)),
                 URLQueryItem(name: "Limit", value: String(limit))

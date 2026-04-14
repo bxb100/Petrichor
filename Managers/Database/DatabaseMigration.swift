@@ -216,8 +216,76 @@ enum DatabaseMigrator {
             Logger.info("v12_add_remote_enrichment_state migration completed")
         }
 
+        migrator.registerMigration("v13_backfill_missing_track_years") { db in
+            let trackRows = try Row.fetchAll(
+                db,
+                sql: """
+                    SELECT id, year, release_date, original_release_date
+                    FROM tracks
+                    WHERE year IS NULL OR year = '' OR year = 'Unknown Year'
+                """
+            )
+
+            var updatedTrackCount = 0
+            for row in trackRows {
+                let trackId: Int64 = row["id"]
+                let year: String? = row["year"]
+                let releaseDate: String? = row["release_date"]
+                let originalReleaseDate: String? = row["original_release_date"]
+
+                guard let resolvedYear = MetadataYearResolver.resolvedYear(
+                    primaryYear: year,
+                    releaseDate: releaseDate,
+                    originalReleaseDate: originalReleaseDate
+                ) else {
+                    continue
+                }
+
+                try db.execute(
+                    sql: "UPDATE tracks SET year = ? WHERE id = ?",
+                    arguments: [resolvedYear, trackId]
+                )
+                updatedTrackCount += 1
+            }
+
+            let albumRows = try Row.fetchAll(
+                db,
+                sql: """
+                    SELECT
+                        albums.id AS album_id,
+                        MIN(CAST(substr(tracks.year, 1, 4) AS INTEGER)) AS derived_release_year
+                    FROM albums
+                    JOIN tracks ON tracks.album_id = albums.id
+                    WHERE (albums.release_year IS NULL OR albums.release_year = 0)
+                      AND tracks.year IS NOT NULL
+                      AND tracks.year != ''
+                      AND tracks.year != 'Unknown Year'
+                      AND substr(tracks.year, 1, 4) GLOB '[12][0-9][0-9][0-9]'
+                    GROUP BY albums.id
+                """
+            )
+
+            var updatedAlbumCount = 0
+            for row in albumRows {
+                let albumId: Int64 = row["album_id"]
+                let releaseYear: Int? = row["derived_release_year"]
+                guard let releaseYear else { continue }
+
+                try db.execute(
+                    sql: "UPDATE albums SET release_year = ? WHERE id = ?",
+                    arguments: [releaseYear, albumId]
+                )
+                updatedAlbumCount += 1
+            }
+
+            Logger.info(
+                "v13_backfill_missing_track_years migration completed: " +
+                "\(updatedTrackCount) tracks, \(updatedAlbumCount) albums updated"
+            )
+        }
+
         // MARK: - Future Migrations
-        // Add new migrations here as: migrator.registerMigration("v13_description") { db in ... }
+        // Add new migrations here as: migrator.registerMigration("v14_description") { db in ... }
         
         return migrator
     }
@@ -287,12 +355,12 @@ private extension DatabaseMigrator {
 
         try db.create(table: "tracks_rebuild") { t in
             t.autoIncrementedPrimaryKey("id")
-            t.column("folder_id", .integer).references("folders", onDelete: .cascade)
-            t.column("source_id", .text).references("data_sources", column: "id", onDelete: .cascade)
+            t.column("folder_id", .integer)
+            t.column("source_id", .text)
             t.column("source_kind", .text).notNull().defaults(to: LibrarySourceKind.local.rawValue)
             t.column("remote_item_id", .text)
             t.column("remote_enrichment_state", .text).notNull().defaults(to: RemoteTrackEnrichmentState.completed.rawValue)
-            t.column("album_id", .integer).references("albums", onDelete: .setNull)
+            t.column("album_id", .integer)
             t.column("path", .text).notNull().unique()
             t.column("filename", .text).notNull()
             t.column("title", .text)
@@ -311,7 +379,7 @@ private extension DatabaseMigrator {
             t.column("play_count", .integer).notNull().defaults(to: 0)
             t.column("last_played_date", .datetime)
             t.column("is_duplicate", .boolean).notNull().defaults(to: false)
-            t.column("primary_track_id", .integer).references("tracks_rebuild", column: "id", onDelete: .setNull)
+            t.column("primary_track_id", .integer)
             t.column("duplicate_group_id", .text)
             t.column("album_artist", .text)
             t.column("track_number", .integer)
