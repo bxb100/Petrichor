@@ -42,11 +42,10 @@ actor ITunesArtworkService {
                     continue
                 }
 
-                if let compressed = ImageUtils.compressImage(from: data, source: "iTunes/\(query.entity)") {
-                    return compressed
-                }
-
-                return ImageUtils.validatedImageData(from: data, source: "iTunes/\(query.entity)")
+                return ImageUtils.processedImageDataForStorage(
+                    from: data,
+                    source: "iTunes/\(query.entity)"
+                )
             } catch {
                 Logger.warning("Failed to download iTunes artwork for '\(query.term)': \(error)")
             }

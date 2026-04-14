@@ -26,52 +26,38 @@ enum ImageUtils {
     ) -> Data? {
         guard let cgImage = decodedCGImage(from: imageData, source: source) else { return nil }
         let preservesAlpha = hasAlphaChannel(cgImage)
-
-        let srcWidth = CGFloat(cgImage.width)
-        let srcHeight = CGFloat(cgImage.height)
-
-        var destWidth = srcWidth
-        var destHeight = srcHeight
-
-        if srcWidth > maxDimension || srcHeight > maxDimension {
-            let scale = min(maxDimension / srcWidth, maxDimension / srcHeight)
-            destWidth = (srcWidth * scale).rounded(.down)
-            destHeight = (srcHeight * scale).rounded(.down)
-        }
-
-        let targetSize = NSSize(width: destWidth, height: destHeight)
-
-        guard let context = CGContext(
-            data: nil,
-            width: Int(destWidth),
-            height: Int(destHeight),
-            bitsPerComponent: 8,
-            bytesPerRow: 0,
-            space: CGColorSpaceCreateDeviceRGB(),
-            bitmapInfo: renderBitmapInfo
-        ) else {
-            return resizeImage(from: imageData, to: targetSize)
-        }
-        context.interpolationQuality = .high
-        context.draw(cgImage, in: CGRect(x: 0, y: 0, width: destWidth, height: destHeight))
-        guard let finalCGImage = context.makeImage() else {
-            return resizeImage(from: imageData, to: targetSize)
-        }
-
-        if let heicData = encodeHEIC(finalCGImage, quality: quality, preservesAlpha: preservesAlpha) {
-            return heicData
-        }
-
-        // Fall back to JPEG if HEIC encoding fails
-        let logContext = source.map { " from \($0)" } ?? ""
-        Logger.warning("HEIC encoding failed\(logContext), falling back to JPEG")
-        return resizeImage(from: imageData, to: targetSize)
+        let preparedImage = preparedCGImageForStorage(cgImage, maxDimension: maxDimension) ?? cgImage
+        return compressedImageData(from: preparedImage, quality: quality, preservesAlpha: preservesAlpha, source: source)
     }
 
     /// Validate that image data is decodable before storing or rendering it.
     static func validatedImageData(from imageData: Data, source: String? = nil) -> Data? {
         guard decodedCGImage(from: imageData, source: source) != nil else { return nil }
         return imageData
+    }
+
+    /// Validate image data and prefer a smaller re-encoded representation when storing artwork.
+    /// Falls back to the original bytes when re-encoding is not beneficial or fails.
+    static func processedImageDataForStorage(
+        from imageData: Data,
+        maxDimension: CGFloat = 960,
+        quality: CGFloat = 0.8,
+        source: String? = nil
+    ) -> Data? {
+        guard let cgImage = decodedCGImage(from: imageData, source: source) else { return nil }
+        let preservesAlpha = hasAlphaChannel(cgImage)
+        let preparedImage = preparedCGImageForStorage(cgImage, maxDimension: maxDimension) ?? cgImage
+
+        guard let compressedData = compressedImageData(
+            from: preparedImage,
+            quality: quality,
+            preservesAlpha: preservesAlpha,
+            source: source
+        ) else {
+            return imageData
+        }
+
+        return compressedData.count < imageData.count ? compressedData : imageData
     }
 
     /// Encode a CGImage as HEIC data.
@@ -226,6 +212,50 @@ enum ImageUtils {
         context.interpolationQuality = .high
         context.draw(cgImage, in: CGRect(x: 0, y: 0, width: cgImage.width, height: cgImage.height))
         return context.makeImage() ?? cgImage
+    }
+
+    private static func preparedCGImageForStorage(_ cgImage: CGImage, maxDimension: CGFloat) -> CGImage? {
+        let srcWidth = CGFloat(cgImage.width)
+        let srcHeight = CGFloat(cgImage.height)
+
+        guard srcWidth > maxDimension || srcHeight > maxDimension else {
+            return cgImage
+        }
+
+        let scale = min(maxDimension / srcWidth, maxDimension / srcHeight)
+        let destWidth = max(1, Int((srcWidth * scale).rounded(.down)))
+        let destHeight = max(1, Int((srcHeight * scale).rounded(.down)))
+
+        guard let context = CGContext(
+            data: nil,
+            width: destWidth,
+            height: destHeight,
+            bitsPerComponent: 8,
+            bytesPerRow: 0,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: renderBitmapInfo
+        ) else {
+            return nil
+        }
+
+        context.interpolationQuality = .high
+        context.draw(cgImage, in: CGRect(x: 0, y: 0, width: CGFloat(destWidth), height: CGFloat(destHeight)))
+        return context.makeImage()
+    }
+
+    private static func compressedImageData(
+        from cgImage: CGImage,
+        quality: CGFloat,
+        preservesAlpha: Bool,
+        source: String?
+    ) -> Data? {
+        if let heicData = encodeHEIC(cgImage, quality: quality, preservesAlpha: preservesAlpha) {
+            return heicData
+        }
+
+        let logContext = source.map { " from \($0)" } ?? ""
+        Logger.warning("HEIC encoding failed\(logContext), falling back to JPEG")
+        return encodeJPEG(cgImage, quality: quality, preservesAlpha: preservesAlpha)
     }
 
     private static func hasAlphaChannel(_ cgImage: CGImage) -> Bool {

@@ -173,10 +173,10 @@ struct SourcesTabView: View {
                     }
 
                     HStack {
-                        Text("Rolling cache size")
+                        Text("Rolling cache radius")
                         Spacer()
                         Stepper(value: $draft.rollingCacheSize, in: 0...10) {
-                            Text("\(draft.rollingCacheSize) track\(draft.rollingCacheSize == 1 ? "" : "s")")
+                            Text("±\(draft.rollingCacheSize) track\(draft.rollingCacheSize == 1 ? "" : "s")")
                                 .font(.system(.body, design: .monospaced))
                         }
                         .frame(width: 220, alignment: .trailing)

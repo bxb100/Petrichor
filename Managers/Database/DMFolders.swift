@@ -551,8 +551,10 @@ extension DatabaseManager {
                         artworkPaths[directory] = fileURL
                     } else {
                         if let data = try? Data(contentsOf: fileURL) {
-                            artworkMap[directory] = ImageUtils.compressImage(from: data, source: fileURL.path)
-                                ?? ImageUtils.validatedImageData(from: data, source: fileURL.path)
+                            artworkMap[directory] = ImageUtils.processedImageDataForStorage(
+                                from: data,
+                                source: fileURL.path
+                            )
                         }
                     }
                 }

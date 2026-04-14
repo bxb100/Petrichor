@@ -28,8 +28,7 @@ actor LazyArtworkLoader {
             return nil
         }
 
-        let compressed = ImageUtils.compressImage(from: data, source: fileURL.path)
-            ?? ImageUtils.validatedImageData(from: data, source: fileURL.path)
+        let compressed = ImageUtils.processedImageDataForStorage(from: data, source: fileURL.path)
         guard let compressed else { return nil }
         cache[directory] = compressed
         return compressed

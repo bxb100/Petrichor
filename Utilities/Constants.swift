@@ -206,6 +206,18 @@ enum DatabaseConstants {
     static let remoteArtworkDownloadConcurrency = 4
     static let embySyncPageSize = 200
     static let trackListPageSize = 500
+    static let maxHydratedQueueTrackCount = 5_000
+
+    static func queueHydrationWindow(totalCount: Int, centeredAt index: Int) -> Range<Int> {
+        guard totalCount > 0 else { return 0..<0 }
+
+        let clampedIndex = min(max(index, 0), totalCount - 1)
+        let windowCount = min(totalCount, maxHydratedQueueTrackCount)
+        let maxStartOffset = max(0, totalCount - windowCount)
+        let proposedStartOffset = max(0, clampedIndex - (windowCount / 2))
+        let startOffset = min(proposedStartOffset, maxStartOffset)
+        return startOffset..<(startOffset + windowCount)
+    }
 }
 
 // MARK: - Default Playlists

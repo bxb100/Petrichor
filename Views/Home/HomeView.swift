@@ -631,16 +631,32 @@ struct HomeView: View {
         let databaseManager = libraryManager.databaseManager
         let sortField = TrackSortField.detect(from: trackTableSortOrder)
         let ascending = TrackSortField.isAscending(from: trackTableSortOrder)
+        let loadedTracks = pagedTracks
+        let totalTrackCount = max(loadedTracks.count, libraryManager.totalTrackCount)
 
         queueHydrationTask?.cancel()
         queueHydrationTask = Task {
-            var allTracks: [Track] = []
-            var offset = 0
+            guard let selectedIndex = loadedTracks.firstIndex(where: { $0.id == track.id }) else { return }
 
-            while true {
+            let hydrationWindow = DatabaseConstants.queueHydrationWindow(
+                totalCount: totalTrackCount,
+                centeredAt: selectedIndex
+            )
+            guard !hydrationWindow.isEmpty else { return }
+
+            let windowAlreadyLoaded = hydrationWindow.lowerBound == 0 && hydrationWindow.upperBound <= loadedTracks.count
+            var hydratedTracks: [Track] = []
+            var offset = hydrationWindow.lowerBound
+
+            if windowAlreadyLoaded {
+                hydratedTracks = Array(loadedTracks[hydrationWindow])
+            }
+
+            while !windowAlreadyLoaded && offset < hydrationWindow.upperBound {
+                let pageLimit = min(DatabaseConstants.trackListPageSize, hydrationWindow.upperBound - offset)
                 let page = await Task.detached {
                     databaseManager.getAllTracksPage(
-                        limit: DatabaseConstants.trackListPageSize,
+                        limit: pageLimit,
                         offset: offset,
                         sortField: sortField,
                         ascending: ascending
@@ -649,9 +665,9 @@ struct HomeView: View {
 
                 guard !Task.isCancelled else { return }
 
-                allTracks.append(contentsOf: page)
+                hydratedTracks.append(contentsOf: page)
 
-                if page.count < DatabaseConstants.trackListPageSize {
+                if page.isEmpty {
                     break
                 }
 
@@ -663,7 +679,7 @@ struct HomeView: View {
                 guard playlistManager.currentQueue.indices.contains(playlistManager.currentQueueIndex) else { return }
                 guard playlistManager.currentQueue[playlistManager.currentQueueIndex].id == track.id else { return }
 
-                playlistManager.replaceCurrentQueue(with: allTracks, startingAt: track, source: .library)
+                playlistManager.replaceCurrentQueue(with: hydratedTracks, startingAt: track, source: .library)
             }
         }
     }

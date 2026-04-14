@@ -307,13 +307,14 @@ extension LibraryManager {
         let currentTrack = queue[currentIndex]
         guard currentTrack.sourceKind == .emby, let currentSource = source(for: currentTrack) else { return }
 
-        let keepCount = max(0, currentSource.rollingCacheSize)
-        let endIndex = min(queue.count - 1, currentIndex + keepCount)
-        let tracksToKeep = Array(queue[currentIndex...endIndex]).filter { $0.sourceKind == .emby }
+        let keepRadius = max(0, currentSource.rollingCacheSize)
+        let startIndex = max(0, currentIndex - keepRadius)
+        let endIndex = min(queue.count - 1, currentIndex + keepRadius)
+        let tracksToKeep = Array(queue[startIndex...endIndex]).filter { $0.sourceKind == .emby }
 
         do {
             let session = try await validSession(for: currentSource)
-            for track in tracksToKeep.dropFirst() {
+            for track in tracksToKeep where track.id != currentTrack.id {
                 guard let source = source(for: track) else { continue }
                 await embyPlaybackCacheManager.prefetch(
                     track: track,

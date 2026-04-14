@@ -174,7 +174,10 @@ class MetadataExtractor {
                     && AlbumArtFormat.isSupported(ext)
                 {
                     if let data = try? Data(contentsOf: url) {
-                        artworkMap[directory] = ImageUtils.compressImage(from: data, source: url.path) ?? data
+                        artworkMap[directory] = ImageUtils.processedImageDataForStorage(
+                            from: data,
+                            source: url.path
+                        )
                         foundArtworkInCurrentDir = true
                     }
                 }
@@ -592,8 +595,7 @@ class MetadataExtractor {
             return
         }
 
-        let compressed = ImageUtils.compressImage(from: rawData, source: source)
-            ?? ImageUtils.validatedImageData(from: rawData, source: source)
+        let compressed = ImageUtils.processedImageDataForStorage(from: rawData, source: source)
         guard let compressed else { return }
         metadata.artworkData = compressed
 
