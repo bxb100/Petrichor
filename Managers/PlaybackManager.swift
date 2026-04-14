@@ -35,6 +35,10 @@ class PlaybackManager: NSObject, ObservableObject {
         get { playbackProgressState.currentTime }
         set { playbackProgressState.currentTime = newValue }
     }
+    var bufferedProgress: Double {
+        get { playbackProgressState.bufferedProgress }
+        set { playbackProgressState.bufferedProgress = newValue }
+    }
     @Published var volume: Float = 0.7 {
         didSet {
             audioPlayer.volume = volume
@@ -68,6 +72,15 @@ class PlaybackManager: NSObject, ObservableObject {
     private var stateSaveTimer: Timer?
     private var restoredPosition: Double = 0
     private var pendingStartupSeek: PendingStartupSeek?
+    private var remotePlaybackResolutionTask: Task<Void, Never>?
+    private var remotePlaybackRequestID: UUID?
+    private var lastNowPlayingInfoUpdateTime: CFAbsoluteTime = 0
+    private var scheduledSeekWorkItem: DispatchWorkItem?
+    private var scheduledSeekTime: Double?
+    private var deferredSeekWorkItem: DispatchWorkItem?
+    private var pendingProgressSyncTime: Double?
+    private var pendingProgressSyncDeadline: CFAbsoluteTime = 0
+    private var cacheProgressObserver: NSObjectProtocol?
     
     // MARK: - Dependencies
     
@@ -87,12 +100,19 @@ class PlaybackManager: NSObject, ObservableObject {
         
         self.audioPlayer.delegate = self
         self.audioPlayer.volume = volume
+        self.bufferedProgress = 0
         
+        observePlaybackCacheProgress()
         startProgressUpdateTimer()
         restoreAudioEffectsSettings()
     }
     
     deinit {
+        if let cacheProgressObserver {
+            NotificationCenter.default.removeObserver(cacheProgressObserver)
+        }
+        cancelScheduledSeek()
+        cancelDeferredSeek()
         stop()
         stopProgressUpdateTimer()
         stopStateSaveTimer()
@@ -159,6 +179,7 @@ class PlaybackManager: NSObject, ObservableObject {
     // MARK: - Playback Controls
     
     func playTrack(_ track: Track) {
+        cancelRemotePlaybackResolution()
         restoredUITrack = nil
         restoredPosition = 0
         
@@ -223,11 +244,16 @@ class PlaybackManager: NSObject, ObservableObject {
     }
     
     func stop() {
+        cancelScheduledSeek()
+        cancelDeferredSeek()
+        cancelRemotePlaybackResolution()
+        clearPendingProgressSync()
         pendingStartupSeek = nil
         audioPlayer.stop()
         currentTrack = nil
         currentFullTrack = nil
         currentTime = 0
+        bufferedProgress = 0
         isPlaying = false
         restoredPosition = 0
         stopStateSaveTimer()
@@ -235,37 +261,77 @@ class PlaybackManager: NSObject, ObservableObject {
     }
     
     func stopGracefully() {
+        cancelScheduledSeek()
+        cancelDeferredSeek()
+        cancelRemotePlaybackResolution()
+        clearPendingProgressSync()
         pendingStartupSeek = nil
         audioPlayer.stop()
         currentTrack = nil
         currentFullTrack = nil
         currentTime = 0
+        bufferedProgress = 0
         isPlaying = false
         stopStateSaveTimer()
         Logger.info("Playback stopped gracefully")
     }
     
     func seekTo(time: Double) {
-        // Clamp seek position to the engine's actual duration to prevent seek
-        // errors when the DB-stored duration differs from the actual track
-        // duration, this happens in edge-cases for MP3, although it is fixed
-        // in MetadataExtractor so hard refresh on library should resolve this.
-        let engineDuration = audioPlayer.duration
-        let clampedTime = engineDuration > 0 ? min(time, engineDuration) : time
-        audioPlayer.seek(to: clampedTime)
+        cancelScheduledSeek()
+        cancelDeferredSeek()
+        let clampedTime = clampedSeekTime(for: time)
+        setPendingProgressSync(to: clampedTime)
         currentTime = clampedTime
         restoredPosition = clampedTime
+
+        let didSeek = audioPlayer.seek(to: clampedTime)
+        if !didSeek {
+            scheduleDeferredSeek(to: clampedTime)
+        }
         
         NotificationCenter.default.post(
             name: NSNotification.Name("PlayerDidSeek"),
             object: nil,
-            userInfo: ["time": time]
+            userInfo: ["time": clampedTime]
         )
         
         if let track = currentTrack {
             nowPlayingManager.updateNowPlayingInfo(
-                track: track, currentTime: time, isPlaying: isPlaying)
+                track: track, currentTime: clampedTime, isPlaying: isPlaying)
+            lastNowPlayingInfoUpdateTime = CFAbsoluteTimeGetCurrent()
         }
+    }
+
+    func scheduleSeekTo(time: Double, debounceInterval: TimeInterval = 0.12) {
+        let clampedTime = clampedSeekTime(for: time)
+        scheduledSeekTime = clampedTime
+
+        scheduledSeekWorkItem?.cancel()
+
+        let workItem = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            let targetTime = self.scheduledSeekTime ?? clampedTime
+            self.scheduledSeekWorkItem = nil
+            self.scheduledSeekTime = nil
+            self.seekTo(time: targetTime)
+        }
+
+        scheduledSeekWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + debounceInterval, execute: workItem)
+    }
+
+    func flushScheduledSeek(time: Double? = nil) {
+        let targetTime = time ?? scheduledSeekTime
+        cancelScheduledSeek()
+
+        guard let targetTime else { return }
+        seekTo(time: targetTime)
+    }
+
+    func cancelScheduledSeek() {
+        scheduledSeekWorkItem?.cancel()
+        scheduledSeekWorkItem = nil
+        scheduledSeekTime = nil
     }
     
     func setVolume(_ newVolume: Float) {
@@ -356,29 +422,49 @@ class PlaybackManager: NSObject, ObservableObject {
     // MARK: - Private Methods
     
     private func startPlayback(of fullTrack: FullTrack, lightweightTrack: Track) {
+        cancelRemotePlaybackResolution()
         pendingStartupSeek = nil
         currentTrack = lightweightTrack
         currentFullTrack = fullTrack
+        bufferedProgress = fullTrack.isRemote ? 0 : 1
         
         let seekToPosition = restoredPosition
         restoredPosition = 0
 
         if fullTrack.isRemote {
-            Task {
+            let requestID = UUID()
+            remotePlaybackRequestID = requestID
+            remotePlaybackResolutionTask = Task { [weak self] in
+                guard let self else { return }
                 do {
                     let playbackURL = try await self.libraryManager.playbackURL(for: lightweightTrack)
+                    guard !Task.isCancelled else { return }
                     await MainActor.run {
+                        guard self.isCurrentRemotePlaybackRequest(lightweightTrack, requestID: requestID) else {
+                            Logger.info("Discarded stale remote playback URL for \(lightweightTrack.title)")
+                            return
+                        }
+
                         self.startResolvedPlayback(
                             with: playbackURL,
-                            fullTrack: fullTrack,
                             lightweightTrack: lightweightTrack,
                             seekToPosition: seekToPosition
                         )
                     }
+                } catch is CancellationError {
+                    return
                 } catch {
+                    guard !Task.isCancelled else { return }
                     await MainActor.run {
-                        Logger.error("Failed to resolve remote playback URL: \(error)")
-                        NotificationManager.shared.addMessage(.error, "Failed to cache '\(lightweightTrack.title)' from Emby")
+                        guard self.isCurrentRemotePlaybackRequest(lightweightTrack, requestID: requestID) else {
+                            Logger.info("Discarded stale remote playback error for \(lightweightTrack.title)")
+                            return
+                        }
+
+                        self.remotePlaybackResolutionTask = nil
+                        self.remotePlaybackRequestID = nil
+                        Logger.error("Failed to prepare remote playback stream: \(error)")
+                        NotificationManager.shared.addMessage(.error, "Failed to start remote playback for '\(lightweightTrack.title)'")
                     }
                 }
             }
@@ -387,7 +473,6 @@ class PlaybackManager: NSObject, ObservableObject {
 
         startResolvedPlayback(
             with: fullTrack.url,
-            fullTrack: fullTrack,
             lightweightTrack: lightweightTrack,
             seekToPosition: seekToPosition
         )
@@ -395,10 +480,13 @@ class PlaybackManager: NSObject, ObservableObject {
 
     private func startResolvedPlayback(
         with playbackURL: URL,
-        fullTrack: FullTrack,
         lightweightTrack: Track,
         seekToPosition: Double
     ) {
+        remotePlaybackResolutionTask = nil
+        remotePlaybackRequestID = nil
+        bufferedProgress = playbackURL.isFileURL ? 1 : (lightweightTrack.isRemote ? 0 : 1)
+
         if seekToPosition > 0 {
             pendingStartupSeek = PendingStartupSeek(
                 playbackURL: playbackURL,
@@ -426,6 +514,23 @@ class PlaybackManager: NSObject, ObservableObject {
         }
     }
 
+    private func cancelRemotePlaybackResolution() {
+        remotePlaybackResolutionTask?.cancel()
+        remotePlaybackResolutionTask = nil
+        remotePlaybackRequestID = nil
+    }
+
+    private func isCurrentRemotePlaybackRequest(_ track: Track, requestID: UUID) -> Bool {
+        guard remotePlaybackRequestID == requestID,
+              let currentTrack else {
+            return false
+        }
+
+        return currentTrack.resourceLocator == track.resourceLocator
+            && currentTrack.sourceId == track.sourceId
+            && currentTrack.remoteItemId == track.remoteItemId
+    }
+
     private func performPendingStartupSeekIfNeeded() {
         guard audioPlayer.state == .paused,
               let pendingStartupSeek else {
@@ -444,17 +549,55 @@ class PlaybackManager: NSObject, ObservableObject {
             audioPlayer.play(url: pendingStartupSeek.playbackURL, startPaused: false)
         }
     }
+
+    private func observePlaybackCacheProgress() {
+        cacheProgressObserver = NotificationCenter.default.addObserver(
+            forName: EmbyPlaybackCacheManager.progressDidChangeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] notification in
+            guard let self,
+                  let key = notification.userInfo?["key"] as? String,
+                  let progress = notification.userInfo?["progress"] as? Double,
+                  key == self.currentPlaybackCacheProgressKey else {
+                return
+            }
+
+            self.bufferedProgress = progress
+        }
+    }
+
+    private var currentPlaybackCacheProgressKey: String? {
+        guard let currentTrack, currentTrack.sourceKind == .emby else { return nil }
+        return EmbyPlaybackCacheManager.progressKey(for: currentTrack)
+    }
+
+    private func clampedSeekTime(for time: Double) -> Double {
+        // Clamp seek position to the engine's actual duration to prevent seek
+        // errors when the DB-stored duration differs from the actual track
+        // duration, this happens in edge-cases for MP3, although it is fixed
+        // in MetadataExtractor so hard refresh on library should resolve this.
+        let engineDuration = audioPlayer.duration
+        let upperBound = engineDuration > 0 ? engineDuration : time
+        return max(0, min(time, upperBound))
+    }
     
     private func startProgressUpdateTimer() {
         progressUpdateTimer?.cancel()
         
         let timer = DispatchSource.makeTimerSource(queue: .main)
-        timer.schedule(deadline: .now(), repeating: .seconds(1), leeway: .milliseconds(100))
+        timer.schedule(deadline: .now(), repeating: .milliseconds(200), leeway: .milliseconds(50))
         
         timer.setEventHandler { [weak self] in
             guard let self = self, self.isPlaying else { return }
-            self.currentTime = self.audioPlayer.currentPlaybackProgress
-            self.updateNowPlayingInfo()
+            let latestProgress = self.audioPlayer.currentPlaybackProgress
+            self.currentTime = self.resolvedProgressTime(from: latestProgress)
+
+            let now = CFAbsoluteTimeGetCurrent()
+            if now - self.lastNowPlayingInfoUpdateTime >= 1 {
+                self.updateNowPlayingInfo()
+                self.lastNowPlayingInfoUpdateTime = now
+            }
         }
         
         timer.resume()
@@ -464,6 +607,74 @@ class PlaybackManager: NSObject, ObservableObject {
     private func stopProgressUpdateTimer() {
         progressUpdateTimer?.cancel()
         progressUpdateTimer = nil
+    }
+
+    private func setPendingProgressSync(to time: Double, timeout: CFAbsoluteTime? = nil) {
+        let effectiveTimeout = timeout ?? (currentTrack?.isRemote == true ? 2.5 : 1.2)
+        pendingProgressSyncTime = time
+        pendingProgressSyncDeadline = CFAbsoluteTimeGetCurrent() + effectiveTimeout
+    }
+
+    private func clearPendingProgressSync() {
+        pendingProgressSyncTime = nil
+        pendingProgressSyncDeadline = 0
+    }
+
+    private func scheduleDeferredSeek(
+        to time: Double,
+        retryInterval: TimeInterval = 0.15
+    ) {
+        guard pendingProgressSyncTime != nil else { return }
+
+        deferredSeekWorkItem?.cancel()
+
+        let workItem = DispatchWorkItem { [weak self] in
+            self?.performDeferredSeek(to: time, retryInterval: retryInterval)
+        }
+
+        deferredSeekWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + retryInterval, execute: workItem)
+    }
+
+    private func performDeferredSeek(
+        to time: Double,
+        retryInterval: TimeInterval
+    ) {
+        deferredSeekWorkItem = nil
+
+        guard let pendingProgressSyncTime else { return }
+        guard abs(pendingProgressSyncTime - time) <= 0.01 else { return }
+
+        if CFAbsoluteTimeGetCurrent() >= pendingProgressSyncDeadline {
+            return
+        }
+
+        if audioPlayer.seek(to: time) {
+            currentTime = time
+            restoredPosition = time
+            return
+        }
+
+        scheduleDeferredSeek(to: time, retryInterval: retryInterval)
+    }
+
+    private func cancelDeferredSeek() {
+        deferredSeekWorkItem?.cancel()
+        deferredSeekWorkItem = nil
+    }
+
+    private func resolvedProgressTime(from latestProgress: Double) -> Double {
+        guard let pendingProgressSyncTime else {
+            return latestProgress
+        }
+
+        let now = CFAbsoluteTimeGetCurrent()
+        if abs(latestProgress - pendingProgressSyncTime) <= 0.5 || now >= pendingProgressSyncDeadline {
+            clearPendingProgressSync()
+            return latestProgress
+        }
+
+        return pendingProgressSyncTime
     }
     
     private func startStateSaveTimer() {

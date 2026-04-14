@@ -32,7 +32,7 @@ public enum AudioPlayerError: Error {
     case engineError(Error)
     case seekError
     case invalidState
-    
+
     var localizedDescription: String {
         switch self {
         case .fileNotFound:
@@ -53,7 +53,7 @@ public enum AudioPlayerError: Error {
 
 public struct AudioEntryId: Hashable {
     public let id: String
-    
+
     public init(id: String) {
         self.id = id
     }
@@ -73,7 +73,7 @@ public protocol AudioPlayerDelegate: AnyObject {
         duration: Double
     )
     func audioPlayerUnexpectedError(player: PAudioPlayer, error: AudioPlayerError)
-    
+
     // Optional methods with default implementations
     func audioPlayerDidFinishBuffering(player: PAudioPlayer, with entryId: AudioEntryId)
     func audioPlayerDidReadMetadata(player: PAudioPlayer, metadata: [String: String])
@@ -95,11 +95,11 @@ public class PAudioPlayer: NSObject {
         case local
         case remote
     }
-    
+
     // MARK: - Public Properties
-    
+
     public weak var delegate: AudioPlayerDelegate?
-    
+
     public var volume: Float {
         get {
             currentVolume
@@ -116,17 +116,18 @@ public class PAudioPlayer: NSObject {
             applyRemoteVolume()
         }
     }
-    
+
     public private(set) var state: AudioPlayerState = .ready {
         didSet {
             guard oldValue != state else { return }
+            let newState = state
             DispatchQueue.main.async { [weak self] in
                 guard let self = self else { return }
-                self.delegate?.audioPlayerStateChanged(player: self, with: self.state, previous: oldValue)
+                self.delegate?.audioPlayerStateChanged(player: self, with: newState, previous: oldValue)
             }
         }
     }
-    
+
     /// Current playback progress in seconds
     public var currentPlaybackProgress: Double {
         switch activeBackend {
@@ -136,7 +137,7 @@ public class PAudioPlayer: NSObject {
             return sanitizedSeconds(from: remotePlayer?.time)
         }
     }
-    
+
     /// Total duration of current file in seconds
     public var duration: Double {
         switch activeBackend {
@@ -146,14 +147,14 @@ public class PAudioPlayer: NSObject {
             return sanitizedSeconds(from: remotePlayer?.media?.length)
         }
     }
-    
+
     /// Legacy property name for backwards compatibility
     public var progress: Double {
         return currentPlaybackProgress
     }
-    
+
     // MARK: - Private Properties
-    
+
     private let sfbPlayer: SFBPlayer
     private var activeBackend: PlaybackBackend = .local
     private var currentEntryId: AudioEntryId?
@@ -162,12 +163,11 @@ public class PAudioPlayer: NSObject {
     private var pauseWhenPlaybackStarts = false
     private var currentVolume: Float = 1.0
     private static let maxPreBufferSize: UInt64 = 100 * 1024 * 1024
-
     private var remotePlayer: VLCMediaPlayer?
     private var remoteDelegateBridge: VLCMediaPlayerDelegateBridge?
     private var remoteDidStartPlaying = false
     private var remoteStopInProgress = false
-    
+
     // MARK: - Audio Effects Nodes
 
     private var effectsAttached = false
@@ -183,26 +183,26 @@ public class PAudioPlayer: NSObject {
     private var userPreampGain: Float = 0.0
     private var currentEQGains: [Float] = Array(repeating: 0.0, count: 10)
     private let eqFrequencies: [Float] = [32, 64, 125, 250, 500, 1000, 2000, 4000, 8000, 16000]
-    
+
     // MARK: - Initialization
-    
+
     public override init() {
         self.sfbPlayer = SFBPlayer()
         super.init()
-        
+
         // Create and set up the delegate bridge for playback event monitoring
         self.delegateBridge = SFBAudioPlayerDelegateBridge(owner: self)
         self.sfbPlayer.delegate = self.delegateBridge
     }
-    
+
     deinit {
         remotePlayer?.stop()
         remotePlayer?.delegate = nil
         sfbPlayer.stop()
     }
-    
+
     // MARK: - Playback Control
-    
+
     /// Play an audio file from URL
     /// - Parameters:
     ///   - url: The URL of the audio file
@@ -223,7 +223,7 @@ public class PAudioPlayer: NSObject {
             playRemote(url: url, startPaused: startPaused, entryId: entryId)
         }
     }
-    
+
     /// Pause playback
     public func pause() {
         guard state == .playing else { return }
@@ -240,7 +240,7 @@ public class PAudioPlayer: NSObject {
 
         Logger.info("Playback paused")
     }
-    
+
     /// Resume playback
     public func resume() {
         guard state == .paused else { return }
@@ -259,12 +259,12 @@ public class PAudioPlayer: NSObject {
         case .remote:
             remotePlayer?.play()
             if state != .playing {
-                state = .ready
+                state = .playing
             }
             Logger.info("Remote playback resumed")
         }
     }
-    
+
     /// Stop playback
     public func stop() {
         guard state != .stopped else { return }
@@ -275,7 +275,7 @@ public class PAudioPlayer: NSObject {
             stopRemotePlayback(notifyFinish: true)
         }
     }
-    
+
     /// Toggle between play and pause
     public func togglePlayPause() {
         switch activeBackend {
@@ -305,7 +305,7 @@ public class PAudioPlayer: NSObject {
             }
         }
     }
-    
+
     /// Seek to a specific time in seconds
     /// - Parameter time: The target time in seconds
     /// - Returns: true if seek was successful
@@ -333,7 +333,7 @@ public class PAudioPlayer: NSObject {
             return true
         }
     }
-    
+
     /// Seek forward by a number of seconds
     /// - Parameter seconds: Number of seconds to skip forward
     /// - Returns: true if seek was successful
@@ -346,7 +346,7 @@ public class PAudioPlayer: NSObject {
             return seek(to: currentPlaybackProgress + seconds)
         }
     }
-    
+
     /// Seek backward by a number of seconds
     /// - Parameter seconds: Number of seconds to skip backward
     /// - Returns: true if seek was successful
@@ -359,22 +359,22 @@ public class PAudioPlayer: NSObject {
             return seek(to: max(0, currentPlaybackProgress - seconds))
         }
     }
-    
+
     // MARK: - Audio Equalizer
-    
+
     /// Enable or disable stereo widening effect
     /// - Parameter enabled: boolean for the current state of stereo widening
     public func setStereoWidening(enabled: Bool) {
         stereoWideningEnabled = enabled
-        
+
         if !effectsAttached {
             setupAudioEffects()
         }
-        
+
         if let effectNode = stereoWideningNode as? AVAudioUnitEffect {
             effectNode.bypass = !enabled
         }
-        
+
         Logger.info("Stereo Widening \(enabled ? "enabled" : "disabled")")
     }
 
@@ -383,49 +383,49 @@ public class PAudioPlayer: NSObject {
     public func isStereoWideningEnabled() -> Bool {
         return stereoWideningEnabled
     }
-    
+
     /// Enable or disable the equalizer
     /// - Parameter enabled: boolean for the current state Equalizer
     public func setEQEnabled(_ enabled: Bool) {
         eqEnabled = enabled
-        
+
         if !effectsAttached {
             setupAudioEffects()
         }
-        
+
         eqNode?.bypass = !enabled
-        
+
         applyEffectivePreamp()
-        
+
         Logger.info("Audio Equalizer \(enabled ? "enabled" : "disabled")")
     }
-    
+
     /// Check if EQ is currently enabled
     /// - Returns: true if Equalizer is enabled, false otherwise
     public func isEQEnabled() -> Bool {
         return eqEnabled
     }
-    
+
     /// Apply an EQ preset
     /// - Parameter preset: The EqualizerPreset to apply
     public func applyEQPreset(_ preset: EqualizerPreset) {
         currentEQGains = preset.gains
-        
+
         if !effectsAttached {
             setupAudioEffects()
         }
-        
+
         if let eq = eqNode {
             for (index, gain) in currentEQGains.enumerated() {
                 eq.bands[index].gain = gain
             }
         }
-        
+
         applyEffectivePreamp()
-        
+
         Logger.info("Applied Equalizer preset: \(preset.displayName)")
     }
-    
+
     /// Apply custom EQ gains
     /// - Parameter gains: Array of 10 gain values in dB (one for each frequency band)
     public func applyEQCustom(gains: [Float]) {
@@ -433,24 +433,24 @@ public class PAudioPlayer: NSObject {
             Logger.warning("Equalizer gains array must contain exactly 10 values, got \(gains.count)")
             return
         }
-        
+
         currentEQGains = gains
-        
+
         if !effectsAttached {
             setupAudioEffects()
         }
-        
+
         if let eq = eqNode {
             for (index, gain) in gains.enumerated() {
                 eq.bands[index].gain = gain
             }
         }
-        
+
         applyEffectivePreamp()
-        
+
         Logger.info("Applied custom Equalizer gains")
     }
-    
+
     /// Set the preamp gain (affects overall volume before EQ)
     /// - Parameter gain: Gain value in dB, typically -12 to +12
     /// - Note: Preamp adjusts the signal level before EQ processing
@@ -465,15 +465,15 @@ public class PAudioPlayer: NSObject {
     public func getPreamp() -> Float {
         return userPreampGain
     }
-    
+
     // MARK: - Internal Methods (called by delegate bridge)
-    
+
     internal func handlePlaybackStateChanged(_ newState: SFBPlayerPlaybackState) {
         guard activeBackend == .local else { return }
 
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
-            
+
             switch newState {
             case .playing:
                 if self.pauseWhenPlaybackStarts {
@@ -503,17 +503,17 @@ public class PAudioPlayer: NSObject {
             }
         }
     }
-    
+
     internal func handleEndOfAudio() {
         guard activeBackend == .local else { return }
 
         let finalProgress = currentPlaybackProgress
         let finalDuration = duration
-        
+
         if let entryId = currentEntryId {
             DispatchQueue.main.async { [weak self] in
                 guard let self = self else { return }
-                
+
                 self.state = .stopped
                 self.delegate?.audioPlayerDidFinishPlaying(
                     player: self,
@@ -522,52 +522,52 @@ public class PAudioPlayer: NSObject {
                     progress: finalProgress,
                     duration: finalDuration
                 )
-                
+
                 self.currentURL = nil
                 self.currentEntryId = nil
             }
         }
     }
-    
+
     /// Reconfigures the audio processing graph when the format changes
     /// This is called by SFBAudioEngine when switching between different sample rates
     internal func reconfigureAudioGraph(engine: AVAudioEngine, format: AVAudioFormat) -> AVAudioNode {
         Logger.info("Reconfiguring audio graph for format: \(format.sampleRate)Hz, \(format.channelCount)ch")
-        
+
         guard effectsAttached else {
             Logger.info("No effects attached, connecting directly to mixer")
             return engine.mainMixerNode
         }
-        
+
         // Detach and recreate effect nodes with the new format
         if let oldStereoNode = stereoWideningNode {
             engine.detach(oldStereoNode)
             stereoWideningNode = nil
         }
-        
+
         if let oldEQNode = eqNode {
             engine.detach(oldEQNode)
             eqNode = nil
         }
-        
+
         // Recreate the effects chain
         setupStereoWidening(engine: engine)
         setupEqualizer(engine: engine)
-        
+
         let mainMixer = engine.mainMixerNode
-        
+
         if let stereoNode = stereoWideningNode, let equalizer = eqNode {
             engine.connect(stereoNode, to: equalizer, format: format)
             engine.connect(equalizer, to: mainMixer, format: format)
             Logger.info("Reconfigured audio graph: playerNode -> stereoWidening -> EQ -> mainMixer")
-            
+
             return stereoNode
         }
-        
+
         Logger.warning("Failed to reconfigure effects chain, falling back to mixer")
         return mainMixer
     }
-    
+
     internal func handleError(_ error: Error) {
         guard activeBackend == .local else { return }
 
@@ -641,28 +641,28 @@ public class PAudioPlayer: NSObject {
             self?.applyRemoteVolume()
         }
     }
-    
+
     // MARK: - Private Methods
-    
+
     private static func shouldPreBuffer(url: URL) -> Bool {
         // Only consider pre-buffering for files under the size threshold
         guard let fileSize = try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize,
               UInt64(fileSize) <= maxPreBufferSize else {
             return false
         }
-        
+
         // Check if the file is on a network volume
         if let resourceValues = try? url.resourceValues(forKeys: [.volumeIsLocalKey]),
            let isLocal = resourceValues.volumeIsLocal,
            !isLocal {
             return true
         }
-        
+
         // Check filesystem type for FUSE-based mounts
         if FilesystemUtils.isSlowFilesystem(url: url) {
             return true
         }
-        
+
         return false
     }
 
@@ -757,7 +757,7 @@ public class PAudioPlayer: NSObject {
 
         player.media = media
         applyRemoteVolume()
-        state = .ready
+        state = startPaused ? .ready : .playing
         player.play()
 
         Logger.info(
@@ -895,12 +895,12 @@ public class PAudioPlayer: NSObject {
         }
         return .engineError(error)
     }
-    
+
     /// Handle playback errors
     private func handlePlaybackError(_ error: Error, entryId: AudioEntryId) {
         Logger.error("Failed to play audio: \(error)")
         state = .stopped
-        
+
         delegate?.audioPlayerUnexpectedError(player: self, error: normalizePlaybackError(error))
         delegate?.audioPlayerDidFinishPlaying(
             player: self,
@@ -910,37 +910,37 @@ public class PAudioPlayer: NSObject {
             duration: 0
         )
     }
-    
+
     private func setupAudioEffects() {
         guard !effectsAttached else {
             Logger.info("Audio effects already attached")
             return
         }
-        
+
         let sourceNode = sfbPlayer.sourceNode
         let mainMixer = sfbPlayer.mainMixerNode
         let format = sourceNode.outputFormat(forBus: 0)
-        
+
         Logger.info("Setting up audio effects...")
         Logger.info("Source node: \(sourceNode), Format: \(format.sampleRate)Hz, \(format.channelCount)ch")
-        
+
         sfbPlayer.modifyProcessingGraph { [self] engine in
             setupStereoWidening(engine: engine)
             setupEqualizer(engine: engine)
-            
+
             guard let stereoNode = stereoWideningNode, let equalizer = eqNode else {
                 Logger.warning("Failed to create effect nodes")
                 return
             }
-            
+
             // Disconnect sourceNode from mainMixer
             engine.disconnectNodeOutput(sourceNode)
-            
+
             // Connect: sourceNode -> stereoWidening -> EQ -> mainMixer
             engine.connect(sourceNode, to: stereoNode, format: format)
             engine.connect(stereoNode, to: equalizer, format: format)
             engine.connect(equalizer, to: mainMixer, format: format)
-            
+
             effectsAttached = true
             Logger.info("Audio effects setup complete")
         }
@@ -953,7 +953,7 @@ public class PAudioPlayer: NSObject {
         delay.feedback = -10
         delay.lowPassCutoff = 15000
         delay.bypass = !stereoWideningEnabled
-        
+
         engine.attach(delay)
         self.stereoWideningNode = delay
 
@@ -962,7 +962,7 @@ public class PAudioPlayer: NSObject {
 
     private func setupEqualizer(engine: AVAudioEngine) {
         let eq = AVAudioUnitEQ(numberOfBands: 10)
-        
+
         for (index, frequency) in eqFrequencies.enumerated() {
             let band = eq.bands[index]
             band.filterType = .parametric
@@ -973,17 +973,17 @@ public class PAudioPlayer: NSObject {
         }
         eq.globalGain = preampGain
         eq.bypass = !eqEnabled
-        
+
         engine.attach(eq)
         self.eqNode = eq
         Logger.info("Attached EQ node to engine")
     }
-    
+
     private func calculateGainCompensation() -> Float {
         guard eqEnabled else { return 0 }
-        
+
         let maxBandGain = currentEQGains.max() ?? 0
-        
+
         if maxBandGain > 0 {
             // Offset max gain to prevent audio
             // distortion due to signal clipping
@@ -991,15 +991,15 @@ public class PAudioPlayer: NSObject {
         }
         return 0
     }
-    
+
     private func applyEffectivePreamp() {
         let compensation = calculateGainCompensation()
         preampGain = userPreampGain + compensation
-        
+
         if !effectsAttached {
             setupAudioEffects()
         }
-        
+
         eqNode?.globalGain = preampGain
     }
 }
@@ -1009,30 +1009,30 @@ public class PAudioPlayer: NSObject {
 /// Internal class that bridges SFBAudioEngine delegate callbacks to PAudioPlayer
 private class SFBAudioPlayerDelegateBridge: NSObject, SFBAudioEngine.AudioPlayer.Delegate {
     weak var owner: PAudioPlayer?
-    
+
     init(owner: PAudioPlayer) {
         self.owner = owner
         super.init()
     }
-    
+
     func audioPlayer(
         _ audioPlayer: SFBAudioEngine.AudioPlayer,
         playbackStateChanged playbackState: SFBAudioEngine.AudioPlayer.PlaybackState
     ) {
         owner?.handlePlaybackStateChanged(playbackState)
     }
-    
+
     func audioPlayerEndOfAudio(_ audioPlayer: SFBAudioEngine.AudioPlayer) {
         owner?.handleEndOfAudio()
     }
-    
+
     func audioPlayer(
         _ audioPlayer: SFBAudioEngine.AudioPlayer,
         encounteredError error: Error
     ) {
         owner?.handleError(error)
     }
-    
+
     func audioPlayer(
         _ audioPlayer: SFBAudioEngine.AudioPlayer,
         reconfigureProcessingGraph engine: AVAudioEngine,

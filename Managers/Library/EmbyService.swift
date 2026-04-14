@@ -259,6 +259,68 @@ enum EmbyServiceError: LocalizedError {
 }
 
 actor EmbyService {
+    private final class DownloadDelegate: NSObject, URLSessionDownloadDelegate, @unchecked Sendable {
+        let progressHandler: @Sendable (Double) -> Void
+        private let lock = NSLock()
+        private var continuation: CheckedContinuation<(URL, URLResponse), Error>?
+
+        init(progressHandler: @escaping @Sendable (Double) -> Void) {
+            self.progressHandler = progressHandler
+        }
+
+        func setContinuation(_ continuation: CheckedContinuation<(URL, URLResponse), Error>) {
+            lock.lock()
+            self.continuation = continuation
+            lock.unlock()
+        }
+
+        private func takeContinuation() -> CheckedContinuation<(URL, URLResponse), Error>? {
+            lock.lock()
+            defer { lock.unlock() }
+
+            let continuation = self.continuation
+            self.continuation = nil
+            return continuation
+        }
+
+        func urlSession(
+            _ session: URLSession,
+            downloadTask: URLSessionDownloadTask,
+            didWriteData bytesWritten: Int64,
+            totalBytesWritten: Int64,
+            totalBytesExpectedToWrite: Int64
+        ) {
+            guard totalBytesExpectedToWrite > 0 else { return }
+            progressHandler(Double(totalBytesWritten) / Double(totalBytesExpectedToWrite))
+        }
+
+        func urlSession(
+            _ session: URLSession,
+            downloadTask: URLSessionDownloadTask,
+            didFinishDownloadingTo location: URL
+        ) {
+            guard let response = downloadTask.response else {
+                takeContinuation()?.resume(throwing: EmbyServiceError.invalidResponse)
+                session.finishTasksAndInvalidate()
+                return
+            }
+
+            progressHandler(1)
+            takeContinuation()?.resume(returning: (location, response))
+            session.finishTasksAndInvalidate()
+        }
+
+        func urlSession(
+            _ session: URLSession,
+            task: URLSessionTask,
+            didCompleteWithError error: Error?
+        ) {
+            guard let error else { return }
+            takeContinuation()?.resume(throwing: error)
+            session.finishTasksAndInvalidate()
+        }
+    }
+
     private let session: URLSession
     private let decoder: JSONDecoder
     private let encoder: JSONEncoder
@@ -442,10 +504,17 @@ actor EmbyService {
         source: LibraryDataSource,
         session embySession: EmbySession,
         track: Track,
-        destinationURL: URL
+        destinationURL: URL,
+        progressHandler: @escaping @Sendable (Double) -> Void = { _ in }
     ) async throws -> URL {
         let remoteURL = try makeStaticStreamURL(source: source, session: embySession, track: track)
-        let (temporaryURL, response) = try await session.download(from: remoteURL)
+        let delegate = DownloadDelegate(progressHandler: progressHandler)
+        let downloadSession = URLSession(configuration: .default, delegate: delegate, delegateQueue: nil)
+        let (temporaryURL, response) = try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<(URL, URLResponse), Error>) in
+            delegate.setContinuation(continuation)
+            let task = downloadSession.downloadTask(with: remoteURL)
+            task.resume()
+        }
 
         guard let httpResponse = response as? HTTPURLResponse else {
             throw EmbyServiceError.invalidResponse

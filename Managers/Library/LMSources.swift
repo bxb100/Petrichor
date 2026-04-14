@@ -313,9 +313,20 @@ extension LibraryManager {
         let tracksToKeep = Array(queue[startIndex...endIndex]).filter { $0.sourceKind == .emby }
 
         do {
-            let session = try await validSession(for: currentSource)
+            var sessionsBySourceID: [UUID: EmbySession] = [
+                currentSource.id: try await validSession(for: currentSource)
+            ]
+
             for track in tracksToKeep where track.id != currentTrack.id {
                 guard let source = source(for: track) else { continue }
+                let session: EmbySession
+                if let existingSession = sessionsBySourceID[source.id] {
+                    session = existingSession
+                } else {
+                    session = try await validSession(for: source)
+                    sessionsBySourceID[source.id] = session
+                }
+
                 await embyPlaybackCacheManager.prefetch(
                     track: track,
                     source: source,

@@ -165,18 +165,59 @@ enum DatabaseMigrator {
             Logger.info("v9_rebuild_artist_associations: flagged for background artist rebuild")
         }
 
-        // TODO: Uncomment in next minor release to add filename index for playlist import performance
-        // migrator.registerMigration("v10_add_filename_index_for_playlist_import") { db in
-        //     try db.createIndexIfNotExists(
-        //         name: "idx_tracks_filename",
-        //         table: "tracks",
-        //         columns: ["filename"]
-        //     )
-        //     Logger.info("v10_add_filename_index_for_playlist_import migration completed")
-        // }
+        migrator.registerMigration("v10_add_remote_data_sources_support") { db in
+            try DatabaseManager.createDataSourcesTable(in: db)
+            try DatabaseManager.createEmbyFavoriteCacheTable(in: db)
+
+            let trackColumnNames = try Set(db.columns(in: "tracks").map(\.name))
+            let hasRemoteSourceColumns = Set(["source_id", "source_kind", "remote_item_id"]).isSubset(of: trackColumnNames)
+            let referencesTemporaryTracksTable = try tracksSchemaReferencesTemporaryTable(db)
+
+            if hasRemoteSourceColumns && !referencesTemporaryTracksTable {
+                Logger.info("v10_add_remote_data_sources_support skipped: tracks schema already supports remote sources")
+                return
+            }
+
+            try rebuildTracksTableForRemoteSourcesSupport(
+                in: db,
+                preserveExistingRemoteColumns: hasRemoteSourceColumns
+            )
+
+            Logger.info("v10_add_remote_data_sources_support migration completed")
+        }
+
+        migrator.registerMigration("v11_repair_tracks_schema_referencing_tracks_tmp") { db in
+            guard try tracksSchemaReferencesTemporaryTable(db) else {
+                Logger.info("v11_repair_tracks_schema_referencing_tracks_tmp skipped: no tracks_tmp reference found")
+                return
+            }
+
+            try rebuildTracksTableForRemoteSourcesSupport(
+                in: db,
+                preserveExistingRemoteColumns: true
+            )
+
+            Logger.info("v11_repair_tracks_schema_referencing_tracks_tmp migration completed")
+        }
+
+        migrator.registerMigration("v12_add_remote_enrichment_state") { db in
+            try db.addColumnIfNotExists(
+                table: "tracks",
+                column: "remote_enrichment_state",
+                type: .text,
+                defaultValue: RemoteTrackEnrichmentState.completed.rawValue,
+                notNull: true
+            )
+            try db.createIndexIfNotExists(
+                name: "idx_tracks_source_enrichment_state",
+                table: "tracks",
+                columns: ["source_id", "remote_enrichment_state"]
+            )
+            Logger.info("v12_add_remote_enrichment_state migration completed")
+        }
 
         // MARK: - Future Migrations
-        // Add new migrations here as: migrator.registerMigration("v11_description") { db in ... }
+        // Add new migrations here as: migrator.registerMigration("v13_description") { db in ... }
         
         return migrator
     }
@@ -209,9 +250,203 @@ enum DatabaseMigrator {
     }
 }
 
+private extension DatabaseMigrator {
+    static func tracksSchemaReferencesTemporaryTable(_ db: Database) throws -> Bool {
+        let trackSchemaSQL = try String.fetchOne(
+            db,
+            sql: "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'tracks'"
+        ) ?? ""
+
+        if trackSchemaSQL.localizedCaseInsensitiveContains("tracks_tmp") {
+            return true
+        }
+
+        let foreignKeyRows = try Row.fetchAll(db, sql: "PRAGMA foreign_key_list(tracks)")
+        for row in foreignKeyRows {
+            let referencedTable: String = row["table"]
+            if referencedTable == "tracks_tmp" {
+                return true
+            }
+        }
+
+        return false
+    }
+
+    static func rebuildTracksTableForRemoteSourcesSupport(
+        in db: Database,
+        preserveExistingRemoteColumns: Bool
+    ) throws {
+        let existingTrackColumnNames = try Set(db.columns(in: "tracks").map(\.name))
+        let hasEnrichmentStateColumn = existingTrackColumnNames.contains("remote_enrichment_state")
+
+        try db.execute(sql: "DROP TRIGGER IF EXISTS tracks_fts_insert")
+        try db.execute(sql: "DROP TRIGGER IF EXISTS tracks_fts_update")
+        try db.execute(sql: "DROP TRIGGER IF EXISTS tracks_fts_delete")
+        try db.execute(sql: "DROP TABLE IF EXISTS tracks_fts")
+        try db.execute(sql: "DROP TABLE IF EXISTS tracks_rebuild")
+
+        try db.create(table: "tracks_rebuild") { t in
+            t.autoIncrementedPrimaryKey("id")
+            t.column("folder_id", .integer).references("folders", onDelete: .cascade)
+            t.column("source_id", .text).references("data_sources", column: "id", onDelete: .cascade)
+            t.column("source_kind", .text).notNull().defaults(to: LibrarySourceKind.local.rawValue)
+            t.column("remote_item_id", .text)
+            t.column("remote_enrichment_state", .text).notNull().defaults(to: RemoteTrackEnrichmentState.completed.rawValue)
+            t.column("album_id", .integer).references("albums", onDelete: .setNull)
+            t.column("path", .text).notNull().unique()
+            t.column("filename", .text).notNull()
+            t.column("title", .text)
+            t.column("artist", .text)
+            t.column("album", .text)
+            t.column("composer", .text)
+            t.column("genre", .text)
+            t.column("year", .text)
+            t.column("duration", .double).check { $0 >= 0 }
+            t.column("format", .text)
+            t.column("file_size", .integer)
+            t.column("date_added", .datetime).notNull()
+            t.column("date_modified", .datetime)
+            t.column("track_artwork_data", .blob)
+            t.column("is_favorite", .boolean).notNull().defaults(to: false)
+            t.column("play_count", .integer).notNull().defaults(to: 0)
+            t.column("last_played_date", .datetime)
+            t.column("is_duplicate", .boolean).notNull().defaults(to: false)
+            t.column("primary_track_id", .integer).references("tracks", column: "id", onDelete: .setNull)
+            t.column("duplicate_group_id", .text)
+            t.column("album_artist", .text)
+            t.column("track_number", .integer)
+            t.column("total_tracks", .integer)
+            t.column("disc_number", .integer)
+            t.column("total_discs", .integer)
+            t.column("rating", .integer).check { $0 == nil || ($0 >= 0 && $0 <= 5) }
+            t.column("compilation", .boolean).defaults(to: false)
+            t.column("release_date", .text)
+            t.column("original_release_date", .text)
+            t.column("bpm", .integer)
+            t.column("media_type", .text)
+            t.column("bitrate", .integer).check { $0 == nil || $0 > 0 }
+            t.column("sample_rate", .integer)
+            t.column("channels", .integer)
+            t.column("codec", .text)
+            t.column("bit_depth", .integer)
+            t.column("lossless", .boolean)
+            t.column("sort_title", .text)
+            t.column("sort_artist", .text)
+            t.column("sort_album", .text)
+            t.column("sort_album_artist", .text)
+            t.column("extended_metadata", .text)
+        }
+
+        if preserveExistingRemoteColumns {
+            if hasEnrichmentStateColumn {
+                try db.execute(
+                    sql: """
+                        INSERT INTO tracks_rebuild (
+                            id, folder_id, source_id, source_kind, remote_item_id, remote_enrichment_state, album_id, path, filename, title, artist,
+                            album, composer, genre, year, duration, format, file_size, date_added, date_modified,
+                            track_artwork_data, is_favorite, play_count, last_played_date, is_duplicate,
+                            primary_track_id, duplicate_group_id, album_artist, track_number, total_tracks,
+                            disc_number, total_discs, rating, compilation, release_date, original_release_date,
+                            bpm, media_type, bitrate, sample_rate, channels, codec, bit_depth, lossless,
+                            sort_title, sort_artist, sort_album, sort_album_artist, extended_metadata
+                        )
+                        SELECT
+                            id, folder_id, source_id, source_kind, remote_item_id, remote_enrichment_state, album_id, path, filename, title, artist,
+                            album, composer, genre, year, duration, format, file_size, date_added, date_modified,
+                            track_artwork_data, is_favorite, play_count, last_played_date, is_duplicate,
+                            primary_track_id, duplicate_group_id, album_artist, track_number, total_tracks,
+                            disc_number, total_discs, rating, compilation, release_date, original_release_date,
+                            bpm, media_type, bitrate, sample_rate, channels, codec, bit_depth, lossless,
+                            sort_title, sort_artist, sort_album, sort_album_artist, extended_metadata
+                        FROM tracks
+                    """
+                )
+            } else {
+                try db.execute(
+                    sql: """
+                        INSERT INTO tracks_rebuild (
+                            id, folder_id, source_id, source_kind, remote_item_id, remote_enrichment_state, album_id, path, filename, title, artist,
+                            album, composer, genre, year, duration, format, file_size, date_added, date_modified,
+                            track_artwork_data, is_favorite, play_count, last_played_date, is_duplicate,
+                            primary_track_id, duplicate_group_id, album_artist, track_number, total_tracks,
+                            disc_number, total_discs, rating, compilation, release_date, original_release_date,
+                            bpm, media_type, bitrate, sample_rate, channels, codec, bit_depth, lossless,
+                            sort_title, sort_artist, sort_album, sort_album_artist, extended_metadata
+                        )
+                        SELECT
+                            id, folder_id, source_id, source_kind, remote_item_id, ?, album_id, path, filename, title, artist,
+                            album, composer, genre, year, duration, format, file_size, date_added, date_modified,
+                            track_artwork_data, is_favorite, play_count, last_played_date, is_duplicate,
+                            primary_track_id, duplicate_group_id, album_artist, track_number, total_tracks,
+                            disc_number, total_discs, rating, compilation, release_date, original_release_date,
+                            bpm, media_type, bitrate, sample_rate, channels, codec, bit_depth, lossless,
+                            sort_title, sort_artist, sort_album, sort_album_artist, extended_metadata
+                        FROM tracks
+                    """,
+                    arguments: [RemoteTrackEnrichmentState.completed.rawValue]
+                )
+            }
+        } else {
+            try db.execute(
+                sql: """
+                    INSERT INTO tracks_rebuild (
+                        id, folder_id, source_id, source_kind, remote_item_id, remote_enrichment_state, album_id, path, filename, title, artist,
+                        album, composer, genre, year, duration, format, file_size, date_added, date_modified,
+                        track_artwork_data, is_favorite, play_count, last_played_date, is_duplicate,
+                        primary_track_id, duplicate_group_id, album_artist, track_number, total_tracks,
+                        disc_number, total_discs, rating, compilation, release_date, original_release_date,
+                        bpm, media_type, bitrate, sample_rate, channels, codec, bit_depth, lossless,
+                        sort_title, sort_artist, sort_album, sort_album_artist, extended_metadata
+                    )
+                    SELECT
+                        id, folder_id, NULL, ?, NULL, ?, album_id, path, filename, title, artist,
+                        album, composer, genre, year, duration, format, file_size, date_added, date_modified,
+                        track_artwork_data, is_favorite, play_count, last_played_date, is_duplicate,
+                        primary_track_id, duplicate_group_id, album_artist, track_number, total_tracks,
+                        disc_number, total_discs, rating, compilation, release_date, original_release_date,
+                        bpm, media_type, bitrate, sample_rate, channels, codec, bit_depth, lossless,
+                        sort_title, sort_artist, sort_album, sort_album_artist, extended_metadata
+                    FROM tracks
+                """,
+                arguments: [LibrarySourceKind.local.rawValue, RemoteTrackEnrichmentState.completed.rawValue]
+            )
+        }
+
+        try db.execute(sql: "DROP TABLE tracks")
+        try db.execute(sql: "ALTER TABLE tracks_rebuild RENAME TO tracks")
+
+        try DatabaseManager.createIndices(in: db)
+        try DatabaseManager.createFTSTable(in: db)
+    }
+}
+
 // MARK: - Migration Helpers
 
 extension Database {
+    /// Helper to safely add a column if it doesn't exist
+    func addColumnIfNotExists(
+        table: String,
+        column: String,
+        type: Database.ColumnType,
+        defaultValue: DatabaseValueConvertible? = nil,
+        notNull: Bool = false
+    ) throws {
+        let columns = try self.columns(in: table)
+        let columnExists = columns.contains { $0.name == column }
+
+        if !columnExists {
+            try self.alter(table: table) { t in
+                var columnDef = t.add(column: column, type)
+                if let defaultValue = defaultValue {
+                    columnDef = columnDef.defaults(to: defaultValue)
+                }
+                if notNull {
+                    columnDef = columnDef.notNull()
+                }
+            }
+        }
+    }
+
     /// Helper to create an index if it doesn't exist
     func createIndexIfNotExists(
         name: String,

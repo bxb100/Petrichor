@@ -1,7 +1,10 @@
 import Foundation
 
 actor EmbyPlaybackCacheManager {
+    static let progressDidChangeNotification = Notification.Name("EmbyPlaybackCacheProgressDidChange")
+
     private var activeDownloads: [String: Task<URL, Error>] = [:]
+    private var downloadProgress: [String: Double] = [:]
     private let fileManager = FileManager.default
     private let cacheDirectoryURL: URL
 
@@ -22,6 +25,7 @@ actor EmbyPlaybackCacheManager {
         try ensureCacheDirectoryExists()
 
         if fileManager.fileExists(atPath: destinationURL.path) {
+            publishProgress(1, for: key)
             return destinationURL
         }
 
@@ -46,6 +50,7 @@ actor EmbyPlaybackCacheManager {
         let destinationURL = cachedFileURL(for: track)
 
         if fileManager.fileExists(atPath: destinationURL.path) {
+            publishProgress(1, for: key)
             return
         }
 
@@ -89,13 +94,21 @@ actor EmbyPlaybackCacheManager {
         return cacheDirectoryURL.appendingPathComponent("\(cacheKey(for: track)).\(fileExtension)")
     }
 
-    private func cacheKey(for track: Track) -> String {
+    static func progressKey(for track: Track) -> String {
         let sourceComponent = track.sourceId ?? TrackLocator.embyIdentifiers(from: track.url)?.sourceId ?? "unknown-source"
         let itemComponent = track.remoteItemId ?? TrackLocator.embyIdentifiers(from: track.url)?.itemId ?? UUID().uuidString
-        let sanitized = "\(sourceComponent)_\(itemComponent)"
+        return "\(sourceComponent)_\(itemComponent)"
             .replacingOccurrences(of: "/", with: "_")
             .replacingOccurrences(of: ":", with: "_")
-        return sanitized
+    }
+
+    func progress(for track: Track) -> Double? {
+        let key = cacheKey(for: track)
+        return downloadProgress[key]
+    }
+
+    private func cacheKey(for track: Track) -> String {
+        Self.progressKey(for: track)
     }
 
     private func ensureCacheDirectoryExists() throws {
@@ -119,11 +132,18 @@ actor EmbyPlaybackCacheManager {
         }
 
         let task = Task<URL, Error> {
-            try await service.downloadAudio(
+            self.publishProgress(0, for: key)
+            return try await service.downloadAudio(
                 source: source,
                 session: session,
                 track: track,
-                destinationURL: destinationURL
+                destinationURL: destinationURL,
+                progressHandler: { [weak self] progress in
+                    guard let self else { return }
+                    Task {
+                        await self.publishProgress(progress, for: key)
+                    }
+                }
             )
         }
         activeDownloads[key] = task
@@ -138,5 +158,24 @@ actor EmbyPlaybackCacheManager {
 
     private func clearActiveDownload(for key: String) async {
         activeDownloads[key] = nil
+        if downloadProgress[key] != 1 {
+            downloadProgress.removeValue(forKey: key)
+        }
+    }
+
+    private func publishProgress(_ progress: Double, for key: String) {
+        let normalizedProgress = max(0, min(1, progress))
+        downloadProgress[key] = normalizedProgress
+
+        Task { @MainActor in
+            NotificationCenter.default.post(
+                name: Self.progressDidChangeNotification,
+                object: nil,
+                userInfo: [
+                    "key": key,
+                    "progress": normalizedProgress
+                ]
+            )
+        }
     }
 }

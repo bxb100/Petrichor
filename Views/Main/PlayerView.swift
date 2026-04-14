@@ -18,6 +18,7 @@ struct PlayerView: View {
     @State private var gradientColors: [Color] = []
     @State private var isDraggingProgress = false
     @State private var tempProgressValue: Double = 0
+    @State private var pendingSeekProgressValue: Double?
     @State private var currentTrackId: UUID?
     @State private var cachedArtworkImage: NSImage?
     @State private var hoveredOverProgress = false
@@ -69,12 +70,19 @@ struct PlayerView: View {
         }
         .onChange(of: playbackManager.currentTrack?.id) {
             updateGradientColors()
+            isDraggingProgress = false
+            pendingSeekProgressValue = nil
         }
         .onChange(of: colorScheme) {
             updateGradientColors()
         }
         .onChange(of: useArtworkColors) {
             updateGradientColors()
+        }
+        .onChange(of: playbackProgressState.currentTime) {
+            guard let pendingSeekProgressValue else { return }
+            guard abs(playbackProgressState.currentTime - pendingSeekProgressValue) <= 0.5 else { return }
+            self.pendingSeekProgressValue = nil
         }
     }
 
@@ -246,8 +254,7 @@ struct PlayerView: View {
 
     private var progressBar: some View {
         HStack(spacing: 8) {
-            // Current time - updated to use displayTime
-            Text(formatDuration(isDraggingProgress ? tempProgressValue : playbackManager.currentTime))
+            Text(formatDuration(displayProgressTime))
                 .font(.system(size: 11, weight: .medium))
                 .foregroundColor(.secondary)
                 .monospacedDigit()
@@ -274,6 +281,14 @@ struct PlayerView: View {
                         .fill(Color.secondary.opacity(0.2))
                         .frame(height: 4)
 
+                    // Buffered track
+                    RoundedRectangle(cornerRadius: 2)
+                        .fill(Color.primary.opacity(0.18))
+                        .frame(
+                            width: geometry.size.width * bufferedPercentage,
+                            height: 4
+                        )
+
                     // Progress track
                     RoundedRectangle(cornerRadius: 2)
                         .fill(Color.accentColor)
@@ -286,16 +301,13 @@ struct PlayerView: View {
                     Circle()
                         .fill(Color.accentColor)
                         .frame(width: 12, height: 12)
-                        .opacity(isDraggingProgress || hoveredOverProgress ? 1.0 : 0.0)
+                        .opacity(isDraggingProgress || pendingSeekProgressValue != nil || hoveredOverProgress ? 1.0 : 0.0)
                         .offset(x: (geometry.size.width * progressPercentage) - 6)
-                        .animation(isDraggingProgress ? .none : .easeInOut(duration: 0.15), value: progressPercentage)
+                        .animation(isDraggingProgress || pendingSeekProgressValue != nil ? .none : .easeInOut(duration: 0.15), value: progressPercentage)
                         .animation(.easeInOut(duration: 0.15), value: hoveredOverProgress)
                 }
                 .contentShape(Rectangle())
                 .gesture(progressDragGesture(in: geometry))
-                .onTapGesture { value in
-                    handleProgressTap(at: value.x, in: geometry.size.width)
-                }
                 .onHover { hovering in
                     hoveredOverProgress = hovering
                 }
@@ -419,9 +431,29 @@ struct PlayerView: View {
 
         if isDraggingProgress {
             return min(1, max(0, tempProgressValue / duration))
-        } else {
-            return min(1, max(0, playbackProgressState.currentTime / duration))
         }
+
+        if let pendingSeekProgressValue {
+            return min(1, max(0, pendingSeekProgressValue / duration))
+        }
+
+        return min(1, max(0, playbackProgressState.currentTime / duration))
+    }
+
+    private var bufferedPercentage: Double {
+        min(1, max(0, playbackProgressState.bufferedProgress))
+    }
+
+    private var displayProgressTime: Double {
+        if isDraggingProgress {
+            return tempProgressValue
+        }
+
+        if let pendingSeekProgressValue {
+            return pendingSeekProgressValue
+        }
+
+        return playbackProgressState.currentTime
     }
 
     private var volumeIcon: String {
@@ -483,24 +515,24 @@ struct PlayerView: View {
                 if !isDraggingProgress {
                     isDraggingProgress = true
                 }
+                pendingSeekProgressValue = nil
                 let percentage = max(0, min(1, value.location.x / geometry.size.width))
-                tempProgressValue = percentage * (playbackManager.currentTrack?.duration ?? 0)
+                let targetTime = percentage * (playbackManager.currentTrack?.duration ?? 0)
+                tempProgressValue = targetTime
+                playbackManager.scheduleSeekTo(time: targetTime)
             }
             .onEnded { value in
                 let percentage = max(0, min(1, value.location.x / geometry.size.width))
                 let newTime = percentage * (playbackManager.currentTrack?.duration ?? 0)
-                playbackManager.seekTo(time: newTime)
-                // Reset dragging state after seek completes
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                    isDraggingProgress = false
+                tempProgressValue = newTime
+                isDraggingProgress = false
+                pendingSeekProgressValue = newTime
+                playbackManager.flushScheduledSeek(time: newTime)
+
+                if abs(playbackProgressState.currentTime - newTime) <= 0.5 {
+                    pendingSeekProgressValue = nil
                 }
             }
-    }
-
-    private func handleProgressTap(at x: CGFloat, in width: CGFloat) {
-        let percentage = x / width
-        let newTime = percentage * (playbackManager.currentTrack?.duration ?? 0)
-        playbackManager.seekTo(time: newTime)
     }
 
     private func formatDuration(_ seconds: Double) -> String {
