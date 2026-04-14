@@ -3,6 +3,13 @@ import Foundation
 extension LibraryManager {
     func loadDataSources() {
         dataSources = databaseManager.loadAllDataSources()
+        if Thread.isMainThread {
+            startEmbyAutoSyncTimer()
+        } else {
+            DispatchQueue.main.async { [weak self] in
+                self?.startEmbyAutoSyncTimer()
+            }
+        }
     }
 
     func passwordForDataSource(_ source: LibraryDataSource) -> String {
@@ -10,6 +17,7 @@ extension LibraryManager {
     }
 
     func saveEmbySource(_ source: LibraryDataSource, password: String) async -> Bool {
+        let existingSource = dataSources.first(where: { $0.id == source.id })
         let resolvedPassword: String
         if password.isEmpty {
             resolvedPassword = passwordForDataSource(source)
@@ -46,7 +54,19 @@ extension LibraryManager {
                 NotificationManager.shared.addMessage(.info, "Saved Emby source '\(savedSourceName)'.")
             }
 
-            await syncEmbySource(mutableSource, forceFavoriteRefresh: true, showNotifications: false)
+            let requiresFullSync =
+                existingSource == nil ||
+                existingSource?.host != mutableSource.host ||
+                existingSource?.port != mutableSource.port ||
+                existingSource?.connectionType != mutableSource.connectionType ||
+                existingSource?.username != mutableSource.username
+
+            await syncEmbySource(
+                mutableSource,
+                forceFavoriteRefresh: true,
+                showNotifications: false,
+                fullSync: requiresFullSync
+            )
             return true
         } catch {
             Logger.error("Failed to save Emby source: \(error)")
@@ -80,12 +100,23 @@ extension LibraryManager {
     func syncEmbySource(
         _ source: LibraryDataSource,
         forceFavoriteRefresh: Bool = false,
-        showNotifications: Bool = true
+        showNotifications: Bool = true,
+        fullSync: Bool = false
     ) async {
+        guard beginEmbySync(for: source.id) else {
+            Logger.info("Skipping Emby sync for '\(source.name)' because a sync is already in progress")
+            return
+        }
+        defer {
+            finishEmbySync(for: source.id)
+        }
+
         await cancelEmbyEnrichmentTask(for: source.id)
 
         do {
             let session = try await validSession(for: source)
+            let isFullSync = fullSync || source.lastSyncedAt == nil
+            let incrementalCutoff = isFullSync ? nil : source.lastSyncedAt?.addingTimeInterval(-60)
             async let favoriteIDsTask: Set<String> = {
                 do {
                     return try await favoriteItemIDs(
@@ -102,12 +133,14 @@ extension LibraryManager {
             let pageSize = DatabaseConstants.embySyncPageSize
             var startIndex = 0
             var retainedTrackKeys = Set<String>()
+            var pendingTracksForEnrichment: [Int64: FullTrack] = [:]
             var syncedTrackCount = 0
             var reportedTotalTrackCount = 0
+            let activityVerb = isFullSync ? "Syncing" : "Updating"
 
             if showNotifications {
                 await MainActor.run {
-                    NotificationManager.shared.startActivity("Syncing Emby source '\(source.name)'...")
+                    NotificationManager.shared.startActivity("\(activityVerb) Emby source '\(source.name)'...")
                 }
             }
 
@@ -116,7 +149,8 @@ extension LibraryManager {
                     source: source,
                     session: session,
                     startIndex: startIndex,
-                    limit: pageSize
+                    limit: pageSize,
+                    minDateLastSaved: incrementalCutoff
                 )
 
                 let items = page.items ?? []
@@ -125,20 +159,24 @@ extension LibraryManager {
                 }
 
                 let tracks = items.compactMap { buildTrack(from: $0, source: source, favoriteIDs: []) }
-                let pageTrackKeys = try await databaseManager.upsertTracksPage(for: source, tracks: tracks)
-                retainedTrackKeys.formUnion(pageTrackKeys)
+                let upsertResult = try await databaseManager.upsertTracksPage(for: source, tracks: tracks)
+                retainedTrackKeys.formUnion(upsertResult.retainedTrackKeys)
+                for pendingTrack in upsertResult.pendingTracks {
+                    guard let trackId = pendingTrack.trackId else { continue }
+                    pendingTracksForEnrichment[trackId] = pendingTrack
+                }
                 syncedTrackCount += tracks.count
                 let currentSyncedTrackCount = syncedTrackCount
                 let currentReportedTotalTrackCount = max(reportedTotalTrackCount, currentSyncedTrackCount)
-                let currentDetail = "Indexed \(currentSyncedTrackCount) tracks from '\(source.name)'"
 
                 await MainActor.run {
                     self.scheduleLibraryReload(delay: 0.05)
                     if showNotifications {
+                        let progressDetailPrefix = isFullSync ? "Indexed" : "Updated"
                         NotificationManager.shared.updateActivityProgress(
                             current: currentSyncedTrackCount,
                             total: currentReportedTotalTrackCount,
-                            detail: currentDetail
+                            detail: "\(progressDetailPrefix) \(currentSyncedTrackCount) tracks from '\(source.name)'"
                         )
                     }
                 }
@@ -147,7 +185,9 @@ extension LibraryManager {
                 startIndex += pageSize
             }
 
-            try await databaseManager.deleteRemoteTracks(for: source, retaining: retainedTrackKeys)
+            if isFullSync {
+                try await databaseManager.deleteRemoteTracks(for: source, retaining: retainedTrackKeys)
+            }
 
             let favoriteIDs = await favoriteIDsTask
             if source.syncFavorites {
@@ -169,11 +209,15 @@ extension LibraryManager {
                 self.refreshDiscoverTracks()
                 if showNotifications {
                     NotificationManager.shared.stopActivity()
-                    NotificationManager.shared.addMessage(.info, "Synced Emby source '\(source.name)' (\(finalSyncedTrackCount) tracks).")
+                    let statusVerb = isFullSync ? "Synced" : "Updated"
+                    NotificationManager.shared.addMessage(.info, "\(statusVerb) Emby source '\(source.name)' (\(finalSyncedTrackCount) tracks).")
                 }
             }
 
-            await startEmbyEnrichmentTask(for: source)
+            await startEmbyEnrichmentTask(
+                for: source,
+                seededTracks: Array(pendingTracksForEnrichment.values)
+            )
         } catch {
             Logger.error("Failed to sync Emby source '\(source.name)': \(error)")
 
@@ -229,7 +273,8 @@ extension LibraryManager {
         await syncEmbySource(
             source,
             forceFavoriteRefresh: true,
-            showNotifications: true
+            showNotifications: true,
+            fullSync: true
         )
 
         await MainActor.run {
@@ -640,11 +685,94 @@ extension LibraryManager {
         await finishEmbyEnrichmentTask(for: source.id, runToken: runToken)
     }
 
+    private func runEmbyEnrichmentLoop(
+        for source: LibraryDataSource,
+        seededTracks: [FullTrack],
+        runToken: UUID
+    ) async {
+        let pendingTracks = seededTracks.filter { $0.remoteEnrichmentState == .pending }
+        guard !pendingTracks.isEmpty else {
+            await finishEmbyEnrichmentTask(for: source.id, runToken: runToken)
+            return
+        }
+
+        var processedTracks = 0
+        var nextBatchStartIndex = 0
+
+        do {
+            let session = try await validSession(for: source)
+
+            while !Task.isCancelled, nextBatchStartIndex < pendingTracks.count {
+                let upperBound = min(nextBatchStartIndex + DatabaseConstants.batchSize, pendingTracks.count)
+                let batch = Array(pendingTracks[nextBatchStartIndex..<upperBound])
+                nextBatchStartIndex = upperBound
+
+                let itemIDs = batch.compactMap(\.remoteItemId)
+                let detailedItems = try await embyService.fetchAudioItemsByIDs(
+                    source: source,
+                    session: session,
+                    itemIDs: itemIDs
+                )
+                let detailedItemsByID: [String: EmbyAudioItem] = Dictionary(
+                    uniqueKeysWithValues: detailedItems.compactMap { item -> (String, EmbyAudioItem)? in
+                        guard let itemId = item.id else { return nil }
+                        return (itemId, item)
+                    }
+                )
+                let artworkByItemID = try await fetchArtworkForEnrichmentBatch(
+                    source: source,
+                    session: session,
+                    tracks: batch,
+                    detailedItemsByID: detailedItemsByID
+                )
+
+                try await databaseManager.applyEmbyTrackEnrichment(
+                    for: source.id,
+                    tracks: batch,
+                    detailedItemsByID: detailedItemsByID,
+                    artworkByItemID: artworkByItemID
+                )
+
+                processedTracks += batch.count
+
+                await updateEmbyEnrichmentProgress(
+                    for: source.id,
+                    runToken: runToken,
+                    sourceName: source.name,
+                    current: min(processedTracks, pendingTracks.count),
+                    total: pendingTracks.count
+                )
+            }
+
+            if !Task.isCancelled {
+                try await databaseManager.cleanupOrphanedData()
+                await databaseManager.detectAndMarkDuplicates()
+
+                await MainActor.run {
+                    self.scheduleLibraryReload()
+                    self.refreshDiscoverTracks()
+                }
+            }
+        } catch {
+            if !Task.isCancelled {
+                Logger.error("Failed to enrich Emby source '\(source.name)': \(error)")
+                await MainActor.run {
+                    NotificationManager.shared.addMessage(.error, "Failed to fill Emby metadata for '\(source.name)'.")
+                }
+            }
+        }
+
+        await finishEmbyEnrichmentTask(for: source.id, runToken: runToken)
+    }
+
     @MainActor
-    private func startEmbyEnrichmentTask(for source: LibraryDataSource) async {
+    private func startEmbyEnrichmentTask(for source: LibraryDataSource, seededTracks: [FullTrack]? = nil) async {
         cancelEmbyEnrichmentTaskSync(for: source.id)
 
-        let totalPendingTracks = await databaseManager.pendingRemoteEnrichmentCount(for: source.id)
+        let seededPendingTracks = seededTracks?.filter { $0.remoteEnrichmentState == .pending } ?? []
+        let totalPendingTracks = seededTracks == nil
+            ? await databaseManager.pendingRemoteEnrichmentCount(for: source.id)
+            : seededPendingTracks.count
         guard totalPendingTracks > 0 else {
             return
         }
@@ -657,11 +785,19 @@ extension LibraryManager {
 
         let task = Task<Void, Never>(priority: .utility) { [weak self] in
             guard let self else { return }
-            await self.runEmbyEnrichmentLoop(
-                for: source,
-                totalPendingTracks: totalPendingTracks,
-                runToken: runToken
-            )
+            if seededTracks == nil {
+                await self.runEmbyEnrichmentLoop(
+                    for: source,
+                    totalPendingTracks: totalPendingTracks,
+                    runToken: runToken
+                )
+            } else {
+                await self.runEmbyEnrichmentLoop(
+                    for: source,
+                    seededTracks: seededPendingTracks,
+                    runToken: runToken
+                )
+            }
         }
         embyEnrichmentTasks[source.id] = task
     }

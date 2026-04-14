@@ -100,17 +100,18 @@ extension DatabaseManager {
     }
 
     func replaceTracks(for source: LibraryDataSource, tracks: [FullTrack]) async throws {
-        let retainedTrackKeys = try await upsertTracksPage(for: source, tracks: tracks)
-        try await deleteRemoteTracks(for: source, retaining: retainedTrackKeys)
+        let upsertResult = try await upsertTracksPage(for: source, tracks: tracks)
+        try await deleteRemoteTracks(for: source, retaining: upsertResult.retainedTrackKeys)
     }
 
-    func upsertTracksPage(for source: LibraryDataSource, tracks: [FullTrack]) async throws -> Set<String> {
+    func upsertTracksPage(for source: LibraryDataSource, tracks: [FullTrack]) async throws -> RemoteTrackUpsertResult {
         try await dbQueue.write { db in
             let cache = ScanLookupCache()
             let sourceId = source.id.uuidString
-            let existingTrackIdsByKey = try existingRemoteTrackIdsByKey(for: sourceId, in: db)
+            let existingTrackSnapshotsByKey = try existingRemoteTrackSnapshotsByKey(for: sourceId, in: db)
 
             var retainedTrackKeys = Set<String>()
+            var pendingTracks: [FullTrack] = []
             var trackArtworkByTrackId: [Int64: Data] = [:]
             var albumArtworkByAlbumId: [Int64: Data] = [:]
 
@@ -126,11 +127,15 @@ extension DatabaseManager {
                 )
                 retainedTrackKeys.insert(trackKey)
 
-                if let existingTrackId = existingTrackIdsByKey[trackKey] {
-                    mutableTrack.trackId = existingTrackId
+                if let existingSnapshot = existingTrackSnapshotsByKey[trackKey] {
+                    mutableTrack.trackId = existingSnapshot.trackId
+                    mergeRemoteSummaryTrack(&mutableTrack, with: existingSnapshot)
                 }
 
                 try upsertRemoteTrack(&mutableTrack, in: db, cache: cache)
+                if mutableTrack.remoteEnrichmentState == .pending {
+                    pendingTracks.append(mutableTrack)
+                }
                 collectArtworkCandidates(
                     from: mutableTrack,
                     trackArtworkByTrackId: &trackArtworkByTrackId,
@@ -144,7 +149,7 @@ extension DatabaseManager {
                 in: db
             )
             try updateEntityStats(in: db)
-            return retainedTrackKeys
+            return RemoteTrackUpsertResult(retainedTrackKeys: retainedTrackKeys, pendingTracks: pendingTracks)
         }
     }
 
@@ -284,6 +289,56 @@ extension DatabaseManager {
     }
 }
 
+struct RemoteTrackUpsertResult {
+    let retainedTrackKeys: Set<String>
+    let pendingTracks: [FullTrack]
+}
+
+private struct RemoteTrackSyncSnapshot {
+    let trackId: Int64
+    let remoteEnrichmentState: RemoteTrackEnrichmentState
+    let title: String
+    let artist: String
+    let album: String
+    let composer: String
+    let genre: String
+    let year: String
+    let duration: Double
+    let format: String
+    let dateAdded: Date?
+    let isFavorite: Bool
+    let playCount: Int
+    let lastPlayedDate: Date?
+    let albumArtist: String?
+    let trackNumber: Int?
+    let totalTracks: Int?
+    let discNumber: Int?
+    let totalDiscs: Int?
+    let rating: Int?
+    let compilation: Bool
+    let releaseDate: String?
+    let originalReleaseDate: String?
+    let bpm: Int?
+    let mediaType: String?
+    let bitrate: Int?
+    let sampleRate: Int?
+    let channels: Int?
+    let codec: String?
+    let bitDepth: Int?
+    let lossless: Bool?
+    let fileSize: Int64?
+    let dateModified: Date?
+    let isDuplicate: Bool
+    let primaryTrackId: Int64?
+    let duplicateGroupId: String?
+    let sortTitle: String?
+    let sortArtist: String?
+    let sortAlbum: String?
+    let sortAlbumArtist: String?
+    let albumId: Int64?
+    let extendedMetadata: ExtendedMetadata?
+}
+
 private extension DatabaseManager {
     func existingRemoteTrackIdsByKey(for sourceId: String, in db: Database) throws -> [String: Int64] {
         let existingTrackRows = try Row.fetchAll(
@@ -310,12 +365,262 @@ private extension DatabaseManager {
         return Dictionary(uniqueKeysWithValues: existingTrackKeys)
     }
 
+    func existingRemoteTrackSnapshotsByKey(for sourceId: String, in db: Database) throws -> [String: RemoteTrackSyncSnapshot] {
+        let existingTrackRows = try Row.fetchAll(
+            db,
+            sql: """
+                SELECT
+                    id,
+                    path,
+                    remote_item_id,
+                    remote_enrichment_state,
+                    title,
+                    artist,
+                    album,
+                    composer,
+                    genre,
+                    year,
+                    duration,
+                    format,
+                    date_added,
+                    is_favorite,
+                    play_count,
+                    last_played_date,
+                    album_artist,
+                    track_number,
+                    total_tracks,
+                    disc_number,
+                    total_discs,
+                    rating,
+                    compilation,
+                    release_date,
+                    original_release_date,
+                    bpm,
+                    media_type,
+                    bitrate,
+                    sample_rate,
+                    channels,
+                    codec,
+                    bit_depth,
+                    lossless,
+                    file_size,
+                    date_modified,
+                    is_duplicate,
+                    primary_track_id,
+                    duplicate_group_id,
+                    sort_title,
+                    sort_artist,
+                    sort_album,
+                    sort_album_artist,
+                    album_id,
+                    extended_metadata
+                FROM tracks
+                WHERE source_id = ?
+                """,
+            arguments: [sourceId]
+        )
+
+        let existingTrackKeys = existingTrackRows.compactMap { row -> (String, RemoteTrackSyncSnapshot)? in
+            let trackId: Int64 = row["id"]
+            let resourceLocator: String = row["path"]
+            let remoteItemId: String? = row["remote_item_id"]
+            let remoteEnrichmentState = RemoteTrackEnrichmentState(rawValue: row["remote_enrichment_state"]) ?? .completed
+            let snapshot = RemoteTrackSyncSnapshot(
+                trackId: trackId,
+                remoteEnrichmentState: remoteEnrichmentState,
+                title: row["title"],
+                artist: row["artist"],
+                album: row["album"],
+                composer: row["composer"],
+                genre: row["genre"],
+                year: row["year"],
+                duration: row["duration"],
+                format: row["format"],
+                dateAdded: row["date_added"],
+                isFavorite: row["is_favorite"],
+                playCount: row["play_count"],
+                lastPlayedDate: row["last_played_date"],
+                albumArtist: row["album_artist"],
+                trackNumber: row["track_number"],
+                totalTracks: row["total_tracks"],
+                discNumber: row["disc_number"],
+                totalDiscs: row["total_discs"],
+                rating: row["rating"],
+                compilation: row["compilation"] ?? false,
+                releaseDate: row["release_date"],
+                originalReleaseDate: row["original_release_date"],
+                bpm: row["bpm"],
+                mediaType: row["media_type"],
+                bitrate: row["bitrate"],
+                sampleRate: row["sample_rate"],
+                channels: row["channels"],
+                codec: row["codec"],
+                bitDepth: row["bit_depth"],
+                lossless: row["lossless"],
+                fileSize: row["file_size"],
+                dateModified: row["date_modified"],
+                isDuplicate: row["is_duplicate"] ?? false,
+                primaryTrackId: row["primary_track_id"],
+                duplicateGroupId: row["duplicate_group_id"],
+                sortTitle: row["sort_title"],
+                sortArtist: row["sort_artist"],
+                sortAlbum: row["sort_album"],
+                sortAlbumArtist: row["sort_album_artist"],
+                albumId: row["album_id"],
+                extendedMetadata: ExtendedMetadata.fromJSON(row["extended_metadata"])
+            )
+            return (stableRemoteTrackKey(
+                sourceId: sourceId,
+                remoteItemId: remoteItemId,
+                resourceLocator: resourceLocator
+            ), snapshot)
+        }
+
+        return Dictionary(uniqueKeysWithValues: existingTrackKeys)
+    }
+
     func stableRemoteTrackKey(sourceId: String, remoteItemId: String?, resourceLocator: String) -> String {
         if let remoteItemId, !remoteItemId.isEmpty {
             return "item:\(sourceId):\(remoteItemId)"
         }
 
         return "path:\(resourceLocator)"
+    }
+
+    func mergeRemoteSummaryTrack(_ track: inout FullTrack, with snapshot: RemoteTrackSyncSnapshot) {
+        if track.title.isEmpty || track.title == "Unknown Title" {
+            track.title = snapshot.title
+        }
+        if track.artist.isEmpty || track.artist == "Unknown Artist" {
+            track.artist = snapshot.artist
+        }
+        if track.album.isEmpty || track.album == "Unknown Album" {
+            track.album = snapshot.album
+        }
+        if track.composer.isEmpty || track.composer == "Unknown Composer" {
+            track.composer = snapshot.composer
+        }
+        if track.genre.isEmpty || track.genre == "Unknown Genre" {
+            track.genre = snapshot.genre
+        }
+        if track.year.isEmpty || track.year == "Unknown Year" {
+            track.year = snapshot.year
+        }
+        if track.duration <= 0 {
+            track.duration = snapshot.duration
+        }
+        if track.format.isEmpty {
+            track.format = snapshot.format
+        }
+        if track.dateAdded == nil {
+            track.dateAdded = snapshot.dateAdded
+        }
+        if track.albumArtist?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false {
+            track.albumArtist = snapshot.albumArtist
+        }
+        if track.trackNumber == nil {
+            track.trackNumber = snapshot.trackNumber
+        }
+        if track.totalTracks == nil {
+            track.totalTracks = snapshot.totalTracks
+        }
+        if track.discNumber == nil {
+            track.discNumber = snapshot.discNumber
+        }
+        if track.totalDiscs == nil {
+            track.totalDiscs = snapshot.totalDiscs
+        }
+        if track.rating == nil {
+            track.rating = snapshot.rating
+        }
+        if track.releaseDate == nil {
+            track.releaseDate = snapshot.releaseDate
+        }
+        if track.originalReleaseDate == nil {
+            track.originalReleaseDate = snapshot.originalReleaseDate
+        }
+        if track.bpm == nil {
+            track.bpm = snapshot.bpm
+        }
+        if track.mediaType?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false {
+            track.mediaType = snapshot.mediaType
+        }
+        if track.bitrate == nil {
+            track.bitrate = snapshot.bitrate
+        }
+        if track.sampleRate == nil {
+            track.sampleRate = snapshot.sampleRate
+        }
+        if track.channels == nil {
+            track.channels = snapshot.channels
+        }
+        if track.codec?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false {
+            track.codec = snapshot.codec
+        }
+        if track.bitDepth == nil {
+            track.bitDepth = snapshot.bitDepth
+        }
+        if track.lossless == nil {
+            track.lossless = snapshot.lossless
+        }
+        if track.fileSize == nil {
+            track.fileSize = snapshot.fileSize
+        }
+        if track.dateModified == nil {
+            track.dateModified = snapshot.dateModified
+        }
+
+        track.compilation = track.compilation || snapshot.compilation
+        track.isDuplicate = snapshot.isDuplicate
+        track.primaryTrackId = snapshot.primaryTrackId
+        track.duplicateGroupId = snapshot.duplicateGroupId
+        track.sortTitle = snapshot.sortTitle
+        track.sortArtist = snapshot.sortArtist
+        track.sortAlbum = snapshot.sortAlbum
+        track.sortAlbumArtist = snapshot.sortAlbumArtist
+        track.albumId = snapshot.albumId
+        if isEmptyExtendedMetadata(track.extendedMetadata) {
+            track.extendedMetadata = snapshot.extendedMetadata
+        }
+
+        if snapshot.remoteEnrichmentState == .completed {
+            track.remoteEnrichmentState = .completed
+            return
+        }
+
+        if !hasMissingEssentialRemoteMetadata(track) {
+            track.remoteEnrichmentState = .completed
+        }
+    }
+
+    func hasMissingEssentialRemoteMetadata(_ track: FullTrack) -> Bool {
+        if track.artist.isEmpty || track.artist == "Unknown Artist" {
+            return true
+        }
+        if track.album.isEmpty || track.album == "Unknown Album" {
+            return true
+        }
+        if track.composer.isEmpty || track.composer == "Unknown Composer" {
+            return true
+        }
+        if track.genre.isEmpty || track.genre == "Unknown Genre" {
+            return true
+        }
+        if track.year.isEmpty || track.year == "Unknown Year" {
+            return true
+        }
+        if track.albumArtist?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false {
+            return true
+        }
+        if track.trackNumber == nil || track.discNumber == nil {
+            return true
+        }
+        return false
+    }
+
+    func isEmptyExtendedMetadata(_ metadata: ExtendedMetadata?) -> Bool {
+        guard let metadata else { return true }
+        return metadata.toJSON() == "{}"
     }
 
     func upsertRemoteTrack(_ track: inout FullTrack, in db: Database, cache: ScanLookupCache) throws {

@@ -18,6 +18,15 @@ struct SourcesTabView: View {
     @State private var isRebuilding = false
     @State private var activeAlert: SourceActionAlert?
 
+    private static let portFormatter: NumberFormatter = {
+        let formatter = NumberFormatter()
+        formatter.numberStyle = .none
+        formatter.usesGroupingSeparator = false
+        formatter.minimum = 0
+        formatter.maximum = 65_535
+        return formatter
+    }()
+
     var body: some View {
         HStack(spacing: 0) {
             sidebar
@@ -125,20 +134,23 @@ struct SourcesTabView: View {
                     TextField("Source Name", text: $draft.name)
                     TextField("IP or Domain", text: $draft.host)
 
-                    HStack {
+                    HStack(alignment: .center, spacing: 12) {
                         Picker("Connection", selection: $draft.connectionType) {
                             ForEach(NetworkConnectionType.allCases) { type in
                                 Text(type.displayName).tag(type)
                             }
                         }
                         .pickerStyle(.segmented)
+                        .labelsHidden()
+                        .frame(maxWidth: .infinity, alignment: .leading)
 
                         TextField(
                             "Port",
                             value: $draft.port,
-                            format: .number
+                            formatter: Self.portFormatter
                         )
-                        .frame(width: 90)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 96)
                     }
 
                     TextField("Username", text: $draft.username)
@@ -173,53 +185,56 @@ struct SourcesTabView: View {
 
                 Section("Actions") {
                     VStack(alignment: .leading, spacing: 12) {
-                        HStack(spacing: 12) {
+                        LazyVGrid(
+                            columns: Array(repeating: GridItem(.flexible(), spacing: 12), count: 3),
+                            alignment: .leading,
+                            spacing: 12
+                        ) {
                             Button(action: saveSource) {
-                                if isSaving {
-                                    ProgressView()
-                                        .controlSize(.small)
-                                } else {
+                                HStack(spacing: 8) {
+                                    if isSaving {
+                                        ProgressView()
+                                            .controlSize(.small)
+                                    }
                                     Text(selectedExistingSource == nil ? "Add Source" : "Save Changes")
+                                        .lineLimit(1)
                                 }
+                                .frame(maxWidth: .infinity)
                             }
                             .buttonStyle(.borderedProminent)
                             .disabled(isSaving || isDeleting || isRebuilding)
 
-                            Button("Sync Library Now") {
-                                Task {
-                                    await syncSelectedSource(forceFavoriteRefresh: false)
-                                }
-                            }
-                            .buttonStyle(.bordered)
-                            .disabled(selectedExistingSource == nil || isSaving || isDeleting || isRebuilding)
-
                             Button("Rebuild Index") {
                                 activeAlert = selectedExistingSource == nil ? nil : .rebuild
                             }
+                            .frame(maxWidth: .infinity)
                             .buttonStyle(.bordered)
                             .disabled(selectedExistingSource == nil || isSaving || isDeleting || isRebuilding)
-                        }
 
-                        HStack(spacing: 12) {
                             Button("Refresh Favorites Cache") {
                                 Task {
                                     guard let source = selectedExistingSource else { return }
                                     await libraryManager.refreshFavoriteCache(for: source)
                                 }
                             }
+                            .frame(maxWidth: .infinity)
                             .buttonStyle(.bordered)
                             .disabled(selectedExistingSource == nil || !draft.syncFavorites || isSaving || isDeleting || isRebuilding)
+                        }
 
-                            if isRebuilding {
-                                HStack(spacing: 8) {
-                                    ProgressView()
-                                        .controlSize(.small)
-                                    Text("Rebuilding index...")
-                                        .font(.system(size: 12))
-                                        .foregroundColor(.secondary)
-                                }
+                        if isRebuilding {
+                            HStack(spacing: 8) {
+                                ProgressView()
+                                    .controlSize(.small)
+                                Text("Rebuilding index...")
+                                    .font(.system(size: 12))
+                                    .foregroundColor(.secondary)
                             }
                         }
+
+                        Text("Emby sources sync automatically after save and refresh every 24 hours.")
+                            .font(.system(size: 12))
+                            .foregroundColor(.secondary)
                     }
 
                     if let source = selectedExistingSource {
@@ -306,11 +321,6 @@ struct SourcesTabView: View {
                 }
             }
         }
-    }
-
-    private func syncSelectedSource(forceFavoriteRefresh: Bool) async {
-        guard let source = selectedExistingSource else { return }
-        await libraryManager.syncEmbySource(source, forceFavoriteRefresh: forceFavoriteRefresh, showNotifications: true)
     }
 
     private func rebuildSelectedSourceIndex() async {

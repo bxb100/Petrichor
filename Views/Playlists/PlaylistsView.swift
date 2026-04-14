@@ -16,6 +16,7 @@ struct PlaylistsView: View {
                     emptySelectionView
                 }
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             .onAppear {
                 if selectedPlaylist == nil && !playlistManager.playlists.isEmpty {
                     selectedPlaylist = playlistManager.playlists.first

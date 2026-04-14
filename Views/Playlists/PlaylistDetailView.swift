@@ -44,6 +44,7 @@ struct PlaylistDetailView: View {
 
                 playlistContent
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             .sheet(isPresented: $showingAddSongs) {
                 AddSongsToPlaylistSheet(playlist: playlist)
             }
@@ -93,15 +94,9 @@ struct PlaylistDetailView: View {
     private var playlistHeader: some View {
         if playlist != nil {
             PlaylistHeader {
-                HStack(alignment: .top, spacing: 20) {
-                    playlistArtwork
-
-                    VStack(alignment: .leading, spacing: 12) {
-                        playlistInfo
-                        playlistControls
-                    }
-
-                    Spacer()
+                ViewThatFits(in: .horizontal) {
+                    playlistHeaderWideLayout
+                    playlistHeaderCompactLayout
                 }
             }
             .background {
@@ -136,23 +131,54 @@ struct PlaylistDetailView: View {
         }
     }
 
-    private var playlistArtwork: some View {
+    private var playlistHeaderWideLayout: some View {
+        HStack(alignment: .top, spacing: 20) {
+            playlistArtwork(size: 120)
+
+            VStack(alignment: .leading, spacing: 12) {
+                playlistInfo
+                playlistControls
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+
+            Spacer(minLength: 0)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var playlistHeaderCompactLayout: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack(alignment: .top, spacing: 16) {
+                playlistArtwork(size: 96)
+
+                playlistInfo
+                    .frame(maxWidth: .infinity, alignment: .leading)
+
+                Spacer(minLength: 0)
+            }
+
+            compactPlaylistControls
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func playlistArtwork(size: CGFloat) -> some View {
         Group {
             if let artworkData = playlist?.artworkData,
                let nsImage = NSImage(data: artworkData) {
                 Image(nsImage: nsImage)
                     .resizable()
                     .aspectRatio(contentMode: .fill)
-                    .frame(width: 120, height: 120)
+                    .frame(width: size, height: size)
                     .clipShape(RoundedRectangle(cornerRadius: 8))
                     .shadow(color: .black.opacity(0.2), radius: 10, x: 0, y: 5)
             } else {
                 RoundedRectangle(cornerRadius: 8)
                     .fill(Color.secondary.opacity(0.2))
-                    .frame(width: 120, height: 120)
+                    .frame(width: size, height: size)
                     .overlay(
                         Image(systemName: playlistIcon)
-                            .font(.system(size: 40))
+                            .font(.system(size: size * 0.33))
                             .foregroundColor(.secondary)
                     )
             }
@@ -170,6 +196,7 @@ struct PlaylistDetailView: View {
                 .font(.title)
                 .fontWeight(.bold)
                 .lineLimit(2)
+                .truncationMode(.tail)
 
             if let playlist = playlist {
                 HStack {
@@ -189,6 +216,7 @@ struct PlaylistDetailView: View {
                 }
             }
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private var playlistControls: some View {
@@ -200,15 +228,7 @@ struct PlaylistDetailView: View {
         let iconTextSpacing: CGFloat = 4
 
         return HStack(spacing: buttonSpacing) {
-            Button(action: pinPlaylist) {
-                Image(systemName: isPinned ? "pin.fill" : "pin")
-                    .font(.system(size: iconSize))
-                    .foregroundStyle(.secondary)
-                    .padding(.vertical, verticalPadding)
-                    .padding(.horizontal, verticalPadding)
-            }
-            .adaptiveCircularButtonStyle()
-            .help(isPinned ? "Remove from Home" : "Pin to Home")
+            pinPlaylistButton(iconSize: iconSize, verticalPadding: verticalPadding)
 
             Button(action: { playPlaylist() }) {
                 HStack(spacing: iconTextSpacing) {
@@ -250,6 +270,64 @@ struct PlaylistDetailView: View {
                 .adaptiveButtonStyle()
             }
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var compactPlaylistControls: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 10) {
+                pinPlaylistButton(iconSize: 12, verticalPadding: 6)
+
+                compactActionButton(title: "Play", systemImage: Icons.playFill, prominent: true) {
+                    playPlaylist()
+                }
+
+                compactActionButton(title: "Shuffle", systemImage: Icons.shuffleFill) {
+                    playPlaylist(shuffle: true)
+                }
+            }
+
+            if playlist?.type == .regular {
+                compactActionButton(title: "Add Songs", systemImage: Icons.plusCircle) {
+                    showingAddSongs = true
+                }
+                .frame(maxWidth: 220)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func pinPlaylistButton(iconSize: CGFloat, verticalPadding: CGFloat) -> some View {
+        Button(action: pinPlaylist) {
+            Image(systemName: isPinned ? "pin.fill" : "pin")
+                .font(.system(size: iconSize))
+                .foregroundStyle(.secondary)
+                .padding(.vertical, verticalPadding)
+                .padding(.horizontal, verticalPadding)
+        }
+        .adaptiveCircularButtonStyle()
+        .help(isPinned ? "Remove from Home" : "Pin to Home")
+    }
+
+    private func compactActionButton(
+        title: String,
+        systemImage: String,
+        prominent: Bool = false,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            HStack(spacing: 6) {
+                Image(systemName: systemImage)
+                    .font(.system(size: 12))
+                Text(title)
+                    .font(.system(size: 13, weight: .medium))
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 6)
+        }
+        .adaptiveButtonStyle(prominent: prominent)
     }
 
     // MARK: - Playlist Content

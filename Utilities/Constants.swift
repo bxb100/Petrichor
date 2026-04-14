@@ -192,6 +192,8 @@ enum TimeConstants {
     static let searchDebounceDuration: UInt64 = 350_000_000
     static let stateSaveTimerDuration: Double = 30.0
     static let playbackProgressTimerDuration: Double = 10.0
+    static let oneHour: TimeInterval = 60 * 60
+    static let twentyFourHours: TimeInterval = 24 * oneHour
     static let pauseHibernationThreshold: TimeInterval = 5 * 60
 }
 

@@ -496,30 +496,42 @@ actor EmbyService {
         source: LibraryDataSource,
         session embySession: EmbySession,
         startIndex: Int,
-        limit: Int
+        limit: Int,
+        minDateLastSaved: Date? = nil
     ) async throws -> EmbyAudioItemQueryResponse {
+        var queryItems = [
+            URLQueryItem(name: "IncludeItemTypes", value: "Audio"),
+            URLQueryItem(name: "Recursive", value: "true"),
+            URLQueryItem(name: "EnableUserData", value: "true"),
+            URLQueryItem(name: "EnableImages", value: "true"),
+            URLQueryItem(name: "ImageTypeLimit", value: "1"),
+            URLQueryItem(name: "EnableImageTypes", value: "Primary"),
+            URLQueryItem(name: "Fields", value: "Genres,MediaSources,DateCreated,DateModified,Path,PremiereDate"),
+            URLQueryItem(name: "SortBy", value: "SortName"),
+            URLQueryItem(name: "StartIndex", value: String(startIndex)),
+            URLQueryItem(name: "Limit", value: String(limit))
+        ]
+        if let minDateLastSaved {
+            queryItems.append(URLQueryItem(name: "MinDateLastSaved", value: iso8601Timestamp(from: minDateLastSaved)))
+        }
+
         let request = try makeRequest(
             source: source,
             path: "/Users/\(embySession.userId)/Items",
             method: "GET",
             token: embySession.accessToken,
-            queryItems: [
-                URLQueryItem(name: "IncludeItemTypes", value: "Audio"),
-                URLQueryItem(name: "Recursive", value: "true"),
-                URLQueryItem(name: "EnableUserData", value: "true"),
-                URLQueryItem(name: "EnableImages", value: "true"),
-                URLQueryItem(name: "ImageTypeLimit", value: "1"),
-                URLQueryItem(name: "EnableImageTypes", value: "Primary"),
-                URLQueryItem(name: "Fields", value: "Genres,MediaSources,DateCreated,DateModified,Path,PremiereDate"),
-                URLQueryItem(name: "SortBy", value: "SortName"),
-                URLQueryItem(name: "StartIndex", value: String(startIndex)),
-                URLQueryItem(name: "Limit", value: String(limit))
-            ],
+            queryItems: queryItems,
             useAuthorizationHeader: true,
             userId: embySession.userId
         )
 
         return try await perform(request)
+    }
+
+    private func iso8601Timestamp(from date: Date) -> String {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter.string(from: date)
     }
 
     private func makeRequest(
