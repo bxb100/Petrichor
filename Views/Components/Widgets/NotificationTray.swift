@@ -62,6 +62,13 @@ class NotificationManager: ObservableObject {
     }
     
     private let messagesKey = "NotificationTrayMessages"
+
+    var currentActivityStatus: String {
+        if let detail = activityProgress?.detail, !detail.isEmpty {
+            return detail
+        }
+        return activityMessage
+    }
     
     private init() {
         loadPersistedMessages()
@@ -210,6 +217,9 @@ struct NotificationTray: View {
         .help(tooltipText)
         .onHover { hovering in
             isHovered = hovering
+        }
+        .onAppear {
+            showingActivity = manager.isActivityInProgress
         }
         .onChange(of: manager.isActivityInProgress) { _, newValue in
             if newValue {

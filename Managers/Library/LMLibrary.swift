@@ -13,6 +13,8 @@ extension LibraryManager {
 
         // Clear caches
         folderTrackCounts.removeAll()
+        cachedLibraryCategories.removeAll()
+        libraryCategoriesLoaded = false
 
         // Load folders and resolve their bookmarks
         let dbFolders = databaseManager.getAllFolders()

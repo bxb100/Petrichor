@@ -99,7 +99,12 @@ extension DatabaseManager {
                         id = row["id"]
                         title = row["title"]
                         totalTracks = row["total_tracks"] ?? 0
-                        artworkData = row["artwork_data"]
+                        if let rawArtwork: Data = row["artwork_data"],
+                           let albumId = id {
+                            artworkData = ImageUtils.validatedImageData(from: rawArtwork, source: "db/albums/\(albumId)")
+                        } else {
+                            artworkData = nil
+                        }
                         releaseYear = row["release_year"]
                         totalDuration = row["totalDuration"] ?? 0
                         artistName = row["artistName"]

@@ -16,7 +16,7 @@ class AppCoordinator: ObservableObject {
     let menuBarManager: MenuBarManager
     let scrobbleManager: ScrobbleManager
     
-    private var hadFoldersAtStartup: Bool = false
+    private var hadSourcesAtStartup: Bool = false
     private let playbackStateKey = "SavedPlaybackState"
     private let playbackUIStateKey = "SavedPlaybackUIState"
     
@@ -50,12 +50,12 @@ class AppCoordinator: ObservableObject {
         // Setup Scrobbling
         scrobbleManager = ScrobbleManager()
         
-        hadFoldersAtStartup = !libraryManager.folders.isEmpty
+        hadSourcesAtStartup = libraryManager.hasConfiguredSources
         
         Self.shared = self
         
         // Check if library is empty at startup - if so, clear any saved state
-        if !hadFoldersAtStartup {
+        if !hadSourcesAtStartup {
             clearAllSavedState()
         } else {
             // Only restore if we have folders
@@ -157,7 +157,7 @@ class AppCoordinator: ObservableObject {
         
         // Don't restore immediately, wait for library to be fully loaded
         if libraryManager.totalTrackCount == 0 {
-            if libraryManager.folders.isEmpty {
+            if !libraryManager.hasConfiguredSources {
                 clearAllSavedState()
                 isRestoringPlayback = false
                 return
@@ -186,13 +186,13 @@ class AppCoordinator: ObservableObject {
         }
         
         // Don't restore if we didn't have folders at startup
-        if !hadFoldersAtStartup {
+        if !hadSourcesAtStartup {
             isRestoringPlayback = false
             return
         }
         
         // Check if library is loaded with content
-        if libraryManager.folders.isEmpty || libraryManager.totalTrackCount == 0 {
+        if !libraryManager.hasConfiguredSources || libraryManager.totalTrackCount == 0 {
             clearAllSavedState()
             isRestoringPlayback = false
             return
@@ -245,7 +245,7 @@ class AppCoordinator: ObservableObject {
         // Create a path to track map as fallback
         let trackPathMap: [String: Track] = Dictionary(
             relevantTracks.map { track in
-                (track.url.path, track)
+                (track.resourceLocator, track)
             }
         ) { first, _ in first }
         
@@ -306,17 +306,17 @@ class AppCoordinator: ObservableObject {
         // Find and prepare the current track
         if let currentTrackId = state.currentTrackId,
            let currentTrack = restoredQueue.first(where: { $0.trackId == currentTrackId }) {
-            // Verify the file exists and is accessible
-            let fileManager = FileManager.default
-            guard fileManager.fileExists(atPath: currentTrack.url.path) else {
-                clearAllSavedState()
-                return
-            }
-            
-            // Try to access the file
-            guard fileManager.isReadableFile(atPath: currentTrack.url.path) else {
-                clearAllSavedState()
-                return
+            if !currentTrack.isRemote {
+                let fileManager = FileManager.default
+                guard fileManager.fileExists(atPath: currentTrack.url.path) else {
+                    clearAllSavedState()
+                    return
+                }
+
+                guard fileManager.isReadableFile(atPath: currentTrack.url.path) else {
+                    clearAllSavedState()
+                    return
+                }
             }
             
             // Clear the temporary UI track before setting the real one

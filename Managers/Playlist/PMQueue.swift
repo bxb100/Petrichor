@@ -9,7 +9,7 @@ import Foundation
 extension PlaylistManager {
     func createLibraryQueue() {
         guard let library = libraryManager else { return }
-        currentQueue = library.tracks
+        currentQueue = library.tracks.isEmpty ? library.databaseManager.getAllTracks() : library.tracks
         currentPlaylist = nil
         currentQueueSource = .library
         Logger.info("Created playback queue from library")
@@ -144,5 +144,24 @@ extension PlaylistManager {
             currentQueueIndex = 0
         }
         Logger.info("Shuffled the playback queue")
+    }
+
+    func replaceCurrentQueue(with tracks: [Track], startingAt track: Track, source: QueueSource) {
+        guard let trackIndex = tracks.firstIndex(where: { $0.id == track.id }) else { return }
+
+        currentPlaylist = nil
+        currentQueueSource = source
+
+        if isShuffleEnabled {
+            var tracksToShuffle = tracks
+            tracksToShuffle.remove(at: trackIndex)
+            tracksToShuffle.shuffle()
+
+            currentQueue = [track] + tracksToShuffle
+            currentQueueIndex = 0
+        } else {
+            currentQueue = tracks
+            currentQueueIndex = trackIndex
+        }
     }
 }

@@ -130,6 +130,14 @@ enum AudioFormat {
     static func isNotSupported(_ fileExtension: String) -> Bool {
         unsupportedExtensions.contains(fileExtension.lowercased())
     }
+
+    static let avPlayerRemoteStreamingExtensions: Set<String> = [
+        "mp3", "aac", "m4a", "alac", "wav", "wave", "aiff", "aif", "aifc", "au"
+    ]
+
+    static func canStreamRemotelyWithAVPlayer(_ fileExtension: String) -> Bool {
+        avPlayerRemoteStreamingExtensions.contains(fileExtension.lowercased())
+    }
 }
 
 // MARK: - Artwork File Formats
@@ -192,6 +200,8 @@ enum TimeConstants {
     static let searchDebounceDuration: UInt64 = 350_000_000
     static let stateSaveTimerDuration: Double = 30.0
     static let playbackProgressTimerDuration: Double = 10.0
+    static let oneHour: TimeInterval = 60 * 60
+    static let twentyFourHours: TimeInterval = 24 * oneHour
     static let pauseHibernationThreshold: TimeInterval = 5 * 60
 }
 
@@ -201,6 +211,21 @@ enum DatabaseConstants {
     static let walMode = "WAL"
     static let batchSize = 50
     static let largeBatchSize = 100
+    static let remoteArtworkDownloadConcurrency = 4
+    static let embySyncPageSize = 200
+    static let trackListPageSize = 500
+    static let maxHydratedQueueTrackCount = 5_000
+
+    static func queueHydrationWindow(totalCount: Int, centeredAt index: Int) -> Range<Int> {
+        guard totalCount > 0 else { return 0..<0 }
+
+        let clampedIndex = min(max(index, 0), totalCount - 1)
+        let windowCount = min(totalCount, maxHydratedQueueTrackCount)
+        let maxStartOffset = max(0, totalCount - windowCount)
+        let proposedStartOffset = max(0, clampedIndex - (windowCount / 2))
+        let startOffset = min(proposedStartOffset, maxStartOffset)
+        return startOffset..<(startOffset + windowCount)
+    }
 }
 
 // MARK: - Default Playlists
@@ -275,7 +300,7 @@ extension Notification.Name {
 // MARK: - Icon Helpers
 
 extension Icons {
-    static func repeatIcon(for mode: RepeatMode) -> String {
+    static func repeatIcon(for mode: PlaybackRepeatMode) -> String {
         switch mode {
         case .off:
             return Icons.repeatFill

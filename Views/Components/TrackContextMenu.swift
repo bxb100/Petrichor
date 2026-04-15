@@ -19,7 +19,9 @@ enum TrackContextMenu {
         // Add info item
         items.append(createShowInfoItem(for: track))
         
-        items.append(createRevealInFinderItem(for: track))
+        if !track.isRemote {
+            items.append(createRevealInFinderItem(for: track))
+        }
         
         items.append(.divider)
         
@@ -89,7 +91,9 @@ enum TrackContextMenu {
         // Add info item
         items.append(createShowInfoItem(for: track))
         
-        items.append(createRevealInFinderItem(for: track))
+        if !track.isRemote {
+            items.append(createRevealInFinderItem(for: track))
+        }
         
         items.append(.divider)
         

@@ -114,7 +114,10 @@ class ArtistBioManager {
                 let bio = artist.hasBio ? nil : await self.fetchArtistBio(name: artist.name)
 
                 if let imageResult,
-                   let compressed = ImageUtils.compressImage(from: imageResult.imageData, source: "ArtistBioManager/\(imageResult.source)") {
+                   let compressed = ImageUtils.processedImageDataForStorage(
+                    from: imageResult.imageData,
+                    source: "ArtistBioManager/\(imageResult.source)"
+                   ) {
                     let source = imageResult.source.components(separatedBy: " – ").first ?? imageResult.source
                     databaseManager.updateArtistInfo(
                         artistId: artist.id,

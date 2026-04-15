@@ -12,7 +12,7 @@ class PlaylistManager: ObservableObject {
     @Published var playlists: [Playlist] = []
     @Published var currentPlaylist: Playlist?
     @Published var isShuffleEnabled: Bool = false
-    @Published var repeatMode: RepeatMode = .off
+    @Published var repeatMode: PlaybackRepeatMode = .off
     @Published var currentQueue: [Track] = []
     @Published var currentQueueIndex: Int = -1
     @Published var currentQueueSource: QueueSource = .library

@@ -9,9 +9,36 @@ struct TrackView: View {
     @Binding var sortOrder: [KeyPathComparator<Track>]
     let onPlayTrack: (Track) -> Void
     let contextMenuItems: ([Track], PlaybackManager) -> [ContextMenuItem]
+    let hasMoreTracks: Bool
+    let isLoadingMoreTracks: Bool
+    let onReachBottom: (() -> Void)?
     
     @AppStorage("trackTableRowSize")
     private var tableRowSize: TableRowSize = .expanded
+
+    init(
+        tracks: [Track],
+        selectedTrackID: Binding<UUID?>,
+        playlistID: UUID?,
+        entityID: UUID?,
+        sortOrder: Binding<[KeyPathComparator<Track>]>,
+        onPlayTrack: @escaping (Track) -> Void,
+        contextMenuItems: @escaping ([Track], PlaybackManager) -> [ContextMenuItem],
+        hasMoreTracks: Bool = false,
+        isLoadingMoreTracks: Bool = false,
+        onReachBottom: (() -> Void)? = nil
+    ) {
+        self.tracks = tracks
+        self._selectedTrackID = selectedTrackID
+        self.playlistID = playlistID
+        self.entityID = entityID
+        self._sortOrder = sortOrder
+        self.onPlayTrack = onPlayTrack
+        self.contextMenuItems = contextMenuItems
+        self.hasMoreTracks = hasMoreTracks
+        self.isLoadingMoreTracks = isLoadingMoreTracks
+        self.onReachBottom = onReachBottom
+    }
 
     var body: some View {
         TrackTableView(
@@ -21,7 +48,10 @@ struct TrackView: View {
             onPlayTrack: onPlayTrack,
             contextMenuItems: contextMenuItems,
             sortOrder: $sortOrder,
-            tableRowSize: $tableRowSize
+            tableRowSize: $tableRowSize,
+            hasMoreTracks: hasMoreTracks,
+            isLoadingMoreTracks: isLoadingMoreTracks,
+            onReachBottom: onReachBottom
         )
     }
 }

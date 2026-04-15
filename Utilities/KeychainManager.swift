@@ -4,6 +4,14 @@ import Security
 enum KeychainManager {
     enum Keys {
         static let lastfmSessionKey = "org.Petrichor.lastfm.sessionKey"
+
+        static func embyPasswordKey(for sourceId: UUID) -> String {
+            "org.Petrichor.emby.\(sourceId.uuidString).password"
+        }
+
+        static func embyAccessTokenKey(for sourceId: UUID) -> String {
+            "org.Petrichor.emby.\(sourceId.uuidString).accessToken"
+        }
     }
     
     // MARK: - Save

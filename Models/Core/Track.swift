@@ -7,6 +7,9 @@ struct Track: Identifiable, Equatable, Hashable, FetchableRecord, PersistableRec
     let id = UUID()
     var trackId: Int64?
     let url: URL
+    var sourceId: String?
+    var sourceKind: LibrarySourceKind = .local
+    var remoteItemId: String?
     
     // Core metadata for display
     var title: String
@@ -47,7 +50,27 @@ struct Track: Identifiable, Equatable, Hashable, FetchableRecord, PersistableRec
     private static var artworkCache = NSCache<NSString, NSData>()
     
     var filename: String {
-        url.lastPathComponent
+        if url.isFileURL {
+            return url.lastPathComponent
+        }
+
+        return remoteItemId ?? url.lastPathComponent
+    }
+
+    var resourceLocator: String {
+        TrackLocator.storageString(for: url)
+    }
+
+    var isRemote: Bool {
+        sourceKind != .local
+    }
+
+    var displayLocation: String {
+        if url.isFileURL {
+            return url.path
+        }
+
+        return url.absoluteString
     }
     
     var albumArtworkSmall: Data? {
@@ -162,6 +185,9 @@ struct Track: Identifiable, Equatable, Hashable, FetchableRecord, PersistableRec
         static let trackId = Column("id")
         static let folderId = Column("folder_id")
         static let path = Column("path")
+        static let sourceId = Column("source_id")
+        static let sourceKind = Column("source_kind")
+        static let remoteItemId = Column("remote_item_id")
         static let filename = Column("filename")
         static let title = Column("title")
         static let artist = Column("artist")
@@ -188,12 +214,15 @@ struct Track: Identifiable, Equatable, Hashable, FetchableRecord, PersistableRec
     init(row: Row) throws {
         // Extract path and create URL
         let path: String = row[Columns.path]
-        self.url = URL(fileURLWithPath: path)
+        self.url = TrackLocator.url(from: path)
         self.format = row[Columns.format]
-        
+
         // Core properties
         trackId = row[Columns.trackId]
         folderId = row[Columns.folderId]
+        sourceId = row[Columns.sourceId]
+        sourceKind = LibrarySourceKind(rawValue: row[Columns.sourceKind]) ?? .local
+        remoteItemId = row[Columns.remoteItemId]
         title = row[Columns.title]
         artist = row[Columns.artist]
         album = row[Columns.album]
@@ -229,7 +258,10 @@ struct Track: Identifiable, Equatable, Hashable, FetchableRecord, PersistableRec
         // Only encode the lightweight fields when saving
         container[Columns.trackId] = trackId
         container[Columns.folderId] = folderId
-        container[Columns.path] = url.path
+        container[Columns.path] = resourceLocator
+        container[Columns.sourceId] = sourceId
+        container[Columns.sourceKind] = sourceKind.rawValue
+        container[Columns.remoteItemId] = remoteItemId
         container[Columns.title] = title
         container[Columns.artist] = artist
         container[Columns.album] = album
@@ -331,6 +363,9 @@ extension Track {
             Columns.trackId,
             Columns.folderId,
             Columns.path,
+            Columns.sourceId,
+            Columns.sourceKind,
+            Columns.remoteItemId,
             Columns.title,
             Columns.artist,
             Columns.album,
@@ -384,23 +419,49 @@ extension Track {
     /// - Parameter db: Database connection
     /// - Returns: FullTrack with all metadata, or nil if not found
     func fullTrack(db: Database) throws -> FullTrack? {
-        guard let trackId = trackId else { return nil }
-        
-        return try FullTrack
+        if let trackId,
+           let fullTrack = try FullTrack
             .filter(FullTrack.Columns.trackId == trackId)
-            .fetchOne(db)
+            .fetchOne(db) {
+            return fullTrack
+        }
+
+        return try resolveFullTrackByStableIdentity(db: db)
     }
     
     /// Async version for fetching FullTrack
     /// - Parameter dbQueue: Database queue
     /// - Returns: FullTrack with all metadata, or nil if not found
     func fullTrack(using dbQueue: DatabaseQueue) async throws -> FullTrack? {
-        guard let trackId = trackId else { return nil }
-
         return try await dbQueue.read { db in
-            try FullTrack
-                .filter(FullTrack.Columns.trackId == trackId)
-                .fetchOne(db)
+            try fullTrack(db: db)
         }
+    }
+
+    private func resolveFullTrackByStableIdentity(db: Database) throws -> FullTrack? {
+        let locator = resourceLocator
+
+        if let fullTrack = try FullTrack
+            .filter(FullTrack.Columns.path == locator)
+            .fetchOne(db) {
+            return fullTrack
+        }
+
+        if url.isFileURL,
+           let fullTrack = try FullTrack
+            .filter(FullTrack.Columns.path.collating(.nocase) == locator)
+            .fetchOne(db) {
+            return fullTrack
+        }
+
+        let resolvedSourceId = sourceId ?? TrackLocator.embyIdentifiers(from: url)?.sourceId
+        let resolvedRemoteItemId = remoteItemId ?? TrackLocator.embyIdentifiers(from: url)?.itemId
+
+        guard let resolvedSourceId, let resolvedRemoteItemId else { return nil }
+
+        return try FullTrack
+            .filter(FullTrack.Columns.sourceId == resolvedSourceId)
+            .filter(FullTrack.Columns.remoteItemId == resolvedRemoteItemId)
+            .fetchOne(db)
     }
 }

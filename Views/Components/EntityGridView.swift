@@ -154,10 +154,7 @@ private class RenderedImageCache {
     }
     
     private func createRenderedImage(from data: Data) -> NSImage? {
-        guard let imageSource = CGImageSourceCreateWithData(data as CFData, nil),
-              let cgImage = CGImageSourceCreateImageAtIndex(imageSource, 0, [
-                kCGImageSourceShouldCacheImmediately: true
-              ] as CFDictionary) else {
+        guard let cgImage = ImageUtils.decodedCGImage(from: data, source: "EntityGridView") else {
             return nil
         }
 

@@ -48,6 +48,14 @@ SOFTWARE.
 - **License**: MIT License
 - **Copyright**: Copyright (c) 2006-2025 Andy Matuschak, Kornel Lesiński, and contributors
 
+### VLCKit
+
+- **Source**: https://github.com/videolan/vlckit
+- **License**: LGPL-2.1-or-later
+- **Copyright**: Copyright (c) 2007-2025 VLC authors and VideoLAN
+
+Petrichor embeds VLCKit for remote stream playback compatibility. VLCKit is distributed as a separate dependency and remains under its original LGPL license.
+
 ---
 
 ## Audio Codec Libraries
@@ -148,6 +156,7 @@ All audio codec libraries listed above are **dynamically linked** at runtime and
 | SFBAudioEngine | MIT          | No (SPM dependency)     |
 | GRDB.swift     | MIT          | No (SPM dependency)     |
 | Sparkle        | MIT          | No (SPM dependency)     |
+| VLCKit         | LGPL-2.1+    | No (SPM dependency)     |
 | Audio Codecs   | BSD/LGPL/GPL | No (dynamic linking)    |
 
 ---
@@ -160,6 +169,7 @@ For the complete license texts of all components, please refer to:
 - SFBAudioEngine: https://github.com/sbooth/SFBAudioEngine/blob/master/LICENSE.txt
 - GRDB.swift: https://github.com/groue/GRDB.swift/blob/master/LICENSE
 - Sparkle: https://github.com/sparkle-project/Sparkle/blob/2.x/LICENSE
+- VLCKit: https://github.com/videolan/vlckit/blob/master/COPYING
 
 Individual codec library licenses can be found in their respective source repositories.
 

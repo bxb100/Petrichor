@@ -172,7 +172,10 @@ struct ArtistImageSheet: View {
                 guard let index = selectedIndex, index < images.count else { return }
                 let result = images[index]
 
-                if let compressed = ImageUtils.compressImage(from: result.imageData, source: "ArtistImageSheet/\(result.source)") {
+                if let compressed = ImageUtils.processedImageDataForStorage(
+                    from: result.imageData,
+                    source: "ArtistImageSheet/\(result.source)"
+                ) {
                     let source = result.source.components(separatedBy: " – ").first ?? result.source
                     saveArtistImage(compressed, url: result.imageUrl, source: source)
                 }

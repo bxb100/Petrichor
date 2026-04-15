@@ -9,6 +9,16 @@ import Foundation
 import GRDB
 
 extension DatabaseManager {
+    func deleteTracks(withRowIDs trackIds: [Int64], in db: Database) throws {
+        guard !trackIds.isEmpty else { return }
+
+        for chunk in trackIds.chunked(into: 400) {
+            _ = try FullTrack
+                .filter(chunk.contains(FullTrack.Columns.trackId))
+                .deleteAll(db)
+        }
+    }
+
     /// Clean up all orphaned data in the database
     func cleanupOrphanedData() async throws {
         Logger.info("Starting comprehensive database cleanup...")
@@ -16,8 +26,8 @@ extension DatabaseManager {
         try await dbQueue.write { db in
             var deletedCounts = [String: Int]()
             
-            // 1. Clean up orphaned entries in junction tables first
-            // Using raw SQL for these as GRDB doesn't have clean syntax for NOT IN subqueries
+            // 1. Clean up orphaned entries in junction tables first.
+            // Using raw SQL for these as GRDB doesn't have clean syntax for NOT IN subqueries.
             
             // Remove track_artists entries where track no longer exists
             try db.execute(
@@ -55,7 +65,7 @@ extension DatabaseManager {
             )
             deletedCounts["playlist_tracks"] = Int(db.changesCount)
             
-            // 2. Now clean up main tables using GRDB where possible
+            // 2. Now clean up main tables using GRDB where possible.
             
             // Get all artist IDs that are still referenced in track_artists
             let artistsWithTracks = try TrackArtist
@@ -108,7 +118,7 @@ extension DatabaseManager {
                 deletedCounts["genres"] = orphanedGenres
             }
             
-            // 3. Clean up other orphaned data using raw SQL
+            // 3. Clean up other orphaned data using raw SQL.
             
             // Check if extended_metadata table exists before cleaning
             let hasExtendedMetadata = try db.tableExists("extended_metadata")

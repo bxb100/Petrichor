@@ -13,11 +13,13 @@ extension DatabaseManager {
     static func setupDatabaseSchema(in db: Database) throws {
         // Create tables in dependency order
         try createFoldersTable(in: db)
+        try createDataSourcesTable(in: db)
         try createArtistsTable(in: db)
         try createAlbumsTable(in: db)
         try createAlbumArtistsTable(in: db)
         try createGenresTable(in: db)
         try createTracksTable(in: db)
+        try createEmbyFavoriteCacheTable(in: db)
         try createPlaylistsTable(in: db)
         try createPlaylistTracksTable(in: db)
         try createTrackArtistsTable(in: db)
@@ -48,6 +50,30 @@ extension DatabaseManager {
             t.column("bookmark_data", .blob)
         }
         Logger.info("Created `folders` table")
+    }
+
+    // MARK: - Data Sources Table
+    static func createDataSourcesTable(in db: Database) throws {
+        try db.createTableIfNotExists("data_sources") { t in
+            t.column("id", .text).primaryKey()
+            t.column("kind", .text).notNull()
+            t.column("name", .text).notNull()
+            t.column("host", .text).notNull()
+            t.column("port", .integer).notNull()
+            t.column("connection_type", .text).notNull()
+            t.column("username", .text).notNull()
+            t.column("sync_favorites", .boolean).notNull().defaults(to: false)
+            t.column("favorites_cache_ttl_seconds", .integer).notNull().defaults(to: 3600)
+            t.column("favorites_cache_updated_at", .datetime)
+            t.column("rolling_cache_size", .integer).notNull().defaults(to: 2)
+            t.column("user_id", .text)
+            t.column("server_id", .text)
+            t.column("last_synced_at", .datetime)
+            t.column("last_sync_error", .text)
+            t.column("created_at", .datetime).notNull()
+            t.column("updated_at", .datetime).notNull()
+        }
+        Logger.info("Created `data_sources` table")
     }
 
     // MARK: - Artists Table
@@ -157,7 +183,11 @@ extension DatabaseManager {
     static func createTracksTable(in db: Database) throws {
         try db.createTableIfNotExists("tracks") { t in
             t.autoIncrementedPrimaryKey("id")
-            t.column("folder_id", .integer).notNull().references("folders", onDelete: .cascade)
+            t.column("folder_id", .integer).references("folders", onDelete: .cascade)
+            t.column("source_id", .text).references("data_sources", column: "id", onDelete: .cascade)
+            t.column("source_kind", .text).notNull().defaults(to: LibrarySourceKind.local.rawValue)
+            t.column("remote_item_id", .text)
+            t.column("remote_enrichment_state", .text).notNull().defaults(to: RemoteTrackEnrichmentState.completed.rawValue)
             t.column("album_id", .integer).references("albums", onDelete: .setNull)
             t.column("path", .text).notNull().unique()
             t.column("filename", .text).notNull()
@@ -179,7 +209,7 @@ extension DatabaseManager {
             
             // Duplicate tracking
             t.column("is_duplicate", .boolean).notNull().defaults(to: false)
-            t.column("primary_track_id", .integer).references("tracks", column: "id", onDelete: .setNull)
+            t.column("primary_track_id", .integer).references("tracks", onDelete: .setNull)
             t.column("duplicate_group_id", .text)
 
             // Additional metadata
@@ -214,6 +244,17 @@ extension DatabaseManager {
         Logger.info("Created `tracks` table")
     }
 
+    // MARK: - Emby Favorite Cache Table
+    static func createEmbyFavoriteCacheTable(in db: Database) throws {
+        try db.createTableIfNotExists("emby_favorite_cache") { t in
+            t.column("source_id", .text).notNull().references("data_sources", column: "id", onDelete: .cascade)
+            t.column("item_id", .text).notNull()
+            t.column("cached_at", .datetime).notNull()
+            t.primaryKey(["source_id", "item_id"])
+        }
+        Logger.info("Created `emby_favorite_cache` table")
+    }
+
     // MARK: - Playlists Table
     static func createPlaylistsTable(in db: Database) throws {
         try db.createTableIfNotExists("playlists") { t in
@@ -235,7 +276,7 @@ extension DatabaseManager {
     static func createPlaylistTracksTable(in db: Database) throws {
         try db.createTableIfNotExists("playlist_tracks") { t in
             t.column("playlist_id", .text).notNull().references("playlists", column: "id", onDelete: .cascade)
-            t.column("track_id", .integer).notNull().references("tracks", column: "id", onDelete: .cascade)
+            t.column("track_id", .integer).notNull().references("tracks", onDelete: .cascade)
             t.column("position", .integer).notNull()
             t.column("date_added", .datetime).notNull()
             t.primaryKey(["playlist_id", "track_id"])
@@ -273,9 +314,9 @@ extension DatabaseManager {
             t.column("filter_type", .text) // For library items: artists, albums, etc.
             t.column("filter_value", .text) // The specific artist/album name
             t.column("entity_id", .text) // UUID for entities (optional)
-            t.column("artist_id", .integer) // Database ID for artist (optional)
-            t.column("album_id", .integer) // Database ID for album (optional)
-            t.column("playlist_id", .text) // For playlist items
+            t.column("artist_id", .integer).references("artists", onDelete: .cascade) // Database ID for artist (optional)
+            t.column("album_id", .integer).references("albums", onDelete: .cascade) // Database ID for album (optional)
+            t.column("playlist_id", .text).references("playlists", column: "id", onDelete: .cascade) // For playlist items
             t.column("display_name", .text).notNull()
             t.column("subtitle", .text) // For albums, shows artist name
             t.column("icon_name", .text).notNull()
@@ -381,6 +422,14 @@ extension DatabaseManager {
     static func createIndices(in db: Database) throws {
         // Tracks table indices
         try db.createIndexIfNotExists(name: "idx_tracks_folder_id", table: "tracks", columns: ["folder_id"])
+        try db.createIndexIfNotExists(name: "idx_tracks_source_id", table: "tracks", columns: ["source_id"])
+        try db.createIndexIfNotExists(name: "idx_tracks_source_kind", table: "tracks", columns: ["source_kind"])
+        try db.createIndexIfNotExists(name: "idx_tracks_remote_item_id", table: "tracks", columns: ["remote_item_id"])
+        try db.createIndexIfNotExists(
+            name: "idx_tracks_source_enrichment_state",
+            table: "tracks",
+            columns: ["source_id", "remote_enrichment_state"]
+        )
         try db.createIndexIfNotExists(name: "idx_tracks_album_id", table: "tracks", columns: ["album_id"])
         try db.createIndexIfNotExists(name: "idx_tracks_artist", table: "tracks", columns: ["artist"])
         try db.createIndexIfNotExists(name: "idx_tracks_album", table: "tracks", columns: ["album"])
@@ -449,6 +498,7 @@ extension DatabaseManager {
 
         // Playlist tracks index
         try db.createIndexIfNotExists(name: "idx_playlist_tracks_playlist_id", table: "playlist_tracks", columns: ["playlist_id"])
+        try db.createIndexIfNotExists(name: "idx_emby_favorite_cache_source_id", table: "emby_favorite_cache", columns: ["source_id"])
 
         // Junction table indices
         try db.createIndexIfNotExists(name: "idx_track_artists_artist_id", table: "track_artists", columns: ["artist_id"])

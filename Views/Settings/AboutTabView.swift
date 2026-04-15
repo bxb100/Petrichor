@@ -12,7 +12,7 @@ struct AboutTabView: View {
 
                 appInfoSection
 
-                if !libraryManager.folders.isEmpty {
+                if libraryManager.hasConfiguredSources {
                     libraryStatisticsSection
                 }
 
@@ -24,7 +24,7 @@ struct AboutTabView: View {
             }
             .padding()
         }
-        .scrollDisabled(libraryManager.folders.isEmpty)
+        .scrollDisabled(!libraryManager.hasConfiguredSources)
         .background(Color.clear)
     }
 
@@ -82,6 +82,11 @@ struct AboutTabView: View {
 
     private var statisticsRow: some View {
         HStack(spacing: 30) {
+            statisticItem(
+                value: "\(libraryManager.dataSources.count)",
+                label: "Sources"
+            )
+
             statisticItem(
                 value: "\(libraryManager.folders.count)",
                 label: "Folders"
