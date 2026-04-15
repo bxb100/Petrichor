@@ -29,7 +29,7 @@ actor EmbyPlaybackCacheManager {
             return destinationURL
         }
 
-        _ = downloadTask(
+        let task = downloadTask(
             key: key,
             track: track,
             source: source,
@@ -37,6 +37,12 @@ actor EmbyPlaybackCacheManager {
             service: service,
             destinationURL: destinationURL
         )
+
+        if shouldWaitForCachedPlayback(of: track) {
+            Logger.info("Waiting for cached remote playback for unsupported AVPlayer format: \(track.format)")
+            return try await task.value
+        }
+
         return try await service.makePlaybackURL(source: source, session: session, track: track)
     }
 
@@ -109,6 +115,12 @@ actor EmbyPlaybackCacheManager {
 
     private func cacheKey(for track: Track) -> String {
         Self.progressKey(for: track)
+    }
+
+    private func shouldWaitForCachedPlayback(of track: Track) -> Bool {
+        let format = track.format.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !format.isEmpty else { return false }
+        return !AudioFormat.canStreamRemotelyWithAVPlayer(format)
     }
 
     private func ensureCacheDirectoryExists() throws {

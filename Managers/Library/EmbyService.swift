@@ -283,6 +283,13 @@ actor EmbyService {
             return continuation
         }
 
+        private func ownedTemporaryURL(for response: URLResponse) -> URL {
+            let suggestedName = response.suggestedFilename ?? UUID().uuidString
+            let fileExtension = URL(fileURLWithPath: suggestedName).pathExtension
+            let filename = fileExtension.isEmpty ? UUID().uuidString : "\(UUID().uuidString).\(fileExtension)"
+            return FileManager.default.temporaryDirectory.appendingPathComponent(filename, isDirectory: false)
+        }
+
         func urlSession(
             _ session: URLSession,
             downloadTask: URLSessionDownloadTask,
@@ -305,8 +312,22 @@ actor EmbyService {
                 return
             }
 
+            let fileManager = FileManager.default
+            let stableTemporaryURL = ownedTemporaryURL(for: response)
+
+            do {
+                if fileManager.fileExists(atPath: stableTemporaryURL.path) {
+                    try fileManager.removeItem(at: stableTemporaryURL)
+                }
+                try fileManager.moveItem(at: location, to: stableTemporaryURL)
+            } catch {
+                takeContinuation()?.resume(throwing: error)
+                session.finishTasksAndInvalidate()
+                return
+            }
+
             progressHandler(1)
-            takeContinuation()?.resume(returning: (location, response))
+            takeContinuation()?.resume(returning: (stableTemporaryURL, response))
             session.finishTasksAndInvalidate()
         }
 

@@ -130,6 +130,14 @@ enum AudioFormat {
     static func isNotSupported(_ fileExtension: String) -> Bool {
         unsupportedExtensions.contains(fileExtension.lowercased())
     }
+
+    static let avPlayerRemoteStreamingExtensions: Set<String> = [
+        "mp3", "aac", "m4a", "alac", "wav", "wave", "aiff", "aif", "aifc", "au"
+    ]
+
+    static func canStreamRemotelyWithAVPlayer(_ fileExtension: String) -> Bool {
+        avPlayerRemoteStreamingExtensions.contains(fileExtension.lowercased())
+    }
 }
 
 // MARK: - Artwork File Formats

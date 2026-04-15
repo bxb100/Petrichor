@@ -1,7 +1,6 @@
 import AVFoundation
 import Foundation
 import SFBAudioEngine
-import VLCKitSPM
 
 typealias SFBPlayer = SFBAudioEngine.AudioPlayer
 typealias SFBPlayerPlaybackState = SFBAudioEngine.AudioPlayer.PlaybackState
@@ -134,7 +133,9 @@ public class PAudioPlayer: NSObject {
         case .local:
             return sfbPlayer.currentTime ?? 0
         case .remote:
-            return sanitizedSeconds(from: remotePlayer?.time)
+            guard let player = avPlayer else { return 0 }
+            let seconds = CMTimeGetSeconds(player.currentTime())
+            return seconds.isFinite && !seconds.isNaN && seconds >= 0 ? seconds : 0
         }
     }
 
@@ -144,7 +145,9 @@ public class PAudioPlayer: NSObject {
         case .local:
             return sfbPlayer.totalTime ?? 0
         case .remote:
-            return sanitizedSeconds(from: remotePlayer?.media?.length)
+            guard let item = avPlayer?.currentItem else { return 0 }
+            let seconds = CMTimeGetSeconds(item.duration)
+            return seconds.isFinite && !seconds.isNaN && seconds > 0 ? seconds : 0
         }
     }
 
@@ -163,8 +166,11 @@ public class PAudioPlayer: NSObject {
     private var pauseWhenPlaybackStarts = false
     private var currentVolume: Float = 1.0
     private static let maxPreBufferSize: UInt64 = 100 * 1024 * 1024
-    private var remotePlayer: VLCMediaPlayer?
-    private var remoteDelegateBridge: VLCMediaPlayerDelegateBridge?
+    private var avPlayer: AVPlayer?
+    private var avPlayerStatusObserver: NSKeyValueObservation?
+    private var avPlayerTimeControlObserver: NSKeyValueObservation?
+    private var avPlayerItemEndObserver: NSObjectProtocol?
+    private var avPlayerItemFailedObserver: NSObjectProtocol?
     private var remoteDidStartPlaying = false
     private var remoteStopInProgress = false
 
@@ -183,6 +189,7 @@ public class PAudioPlayer: NSObject {
     private var userPreampGain: Float = 0.0
     private var currentEQGains: [Float] = Array(repeating: 0.0, count: 10)
     private let eqFrequencies: [Float] = [32, 64, 125, 250, 500, 1000, 2000, 4000, 8000, 16000]
+    private var lastRouteRecoveryAttemptTime: CFAbsoluteTime = 0
 
     // MARK: - Initialization
 
@@ -196,8 +203,7 @@ public class PAudioPlayer: NSObject {
     }
 
     deinit {
-        remotePlayer?.stop()
-        remotePlayer?.delegate = nil
+        teardownRemotePlayback()
         sfbPlayer.stop()
     }
 
@@ -234,7 +240,7 @@ public class PAudioPlayer: NSObject {
             sfbPlayer.pause()
             state = .paused
         case .remote:
-            remotePlayer?.pause()
+            avPlayer?.pause()
             state = .paused
         }
 
@@ -257,7 +263,7 @@ public class PAudioPlayer: NSObject {
                 delegate?.audioPlayerUnexpectedError(player: self, error: .engineError(error))
             }
         case .remote:
-            remotePlayer?.play()
+            avPlayer?.play()
             if state != .playing {
                 state = .playing
             }
@@ -324,12 +330,9 @@ public class PAudioPlayer: NSObject {
 
             return success
         case .remote:
-            guard let remotePlayer, remotePlayer.isSeekable else { return false }
-            let currentDuration = duration
-            guard currentDuration > 0 else { return false }
-
-            let normalizedPosition = Float(min(max(time / currentDuration, 0), 1))
-            remotePlayer.position = normalizedPosition
+            guard let player = avPlayer, player.currentItem != nil else { return false }
+            let cmTime = CMTime(seconds: time, preferredTimescale: 1000)
+            player.seek(to: cmTime, toleranceBefore: .zero, toleranceAfter: .zero)
             return true
         }
     }
@@ -571,22 +574,24 @@ public class PAudioPlayer: NSObject {
     internal func handleError(_ error: Error) {
         guard activeBackend == .local else { return }
 
+        if attemptLocalPlaybackRecovery(from: error) {
+            return
+        }
+
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
             self.delegate?.audioPlayerUnexpectedError(player: self, error: .engineError(error))
         }
     }
 
-    internal func handleRemoteStateChanged() {
+    private func handleAVPlayerTimeControlStatus(_ status: AVPlayer.TimeControlStatus) {
         guard activeBackend == .remote else { return }
 
         DispatchQueue.main.async { [weak self] in
-            guard let self, let remotePlayer = self.remotePlayer else { return }
+            guard let self, !self.remoteStopInProgress else { return }
 
-            self.applyRemoteVolume()
-
-            switch remotePlayer.state {
-            case .opening, .buffering, .esAdded:
+            switch status {
+            case .waitingToPlayAtSpecifiedRate:
                 guard self.state != .paused, self.state != .stopped else { return }
                 if self.state != .ready {
                     self.state = .ready
@@ -594,7 +599,7 @@ public class PAudioPlayer: NSObject {
             case .playing:
                 if self.pauseWhenPlaybackStarts {
                     self.pauseWhenPlaybackStarts = false
-                    remotePlayer.pause()
+                    self.avPlayer?.pause()
                     self.state = .paused
                     Logger.info("Remote playback primed in paused state")
                     return
@@ -613,32 +618,9 @@ public class PAudioPlayer: NSObject {
                 if self.state != .paused {
                     self.state = .paused
                 }
-            case .ended:
-                guard !self.remoteStopInProgress else { return }
-                self.handleRemotePlaybackEnded()
-            case .error:
-                guard !self.remoteStopInProgress else { return }
-                Logger.error("Remote player entered error state for \(self.redactedURLString(self.currentURL))")
-                self.handleRemotePlaybackFailure(AudioPlayerError.invalidFormat)
-            case .stopped:
-                if self.remoteStopInProgress {
-                    return
-                }
-                Logger.warning("Remote player stopped unexpectedly for \(self.redactedURLString(self.currentURL))")
-                if self.state != .stopped {
-                    self.state = .stopped
-                }
             @unknown default:
                 break
             }
-        }
-    }
-
-    internal func handleRemoteTimeChanged() {
-        guard activeBackend == .remote else { return }
-
-        DispatchQueue.main.async { [weak self] in
-            self?.applyRemoteVolume()
         }
     }
 
@@ -738,27 +720,55 @@ public class PAudioPlayer: NSObject {
     private func playRemote(url: URL, startPaused: Bool, entryId: AudioEntryId) {
         teardownRemotePlayback()
 
-        let player = remotePlayer ?? VLCMediaPlayer()
-        if remoteDelegateBridge == nil {
-            remoteDelegateBridge = VLCMediaPlayerDelegateBridge(owner: self)
-        }
-        player.delegate = remoteDelegateBridge
+        let item = AVPlayerItem(url: url)
+        let player = AVPlayer(playerItem: item)
+        player.volume = currentVolume
+        player.automaticallyWaitsToMinimizeStalling = true
 
-        let media = VLCMedia(url: url)
-        media.addOption(":no-video")
-        media.addOption(":network-caching=300")
-        media.addOption(":live-caching=300")
-        media.addOption(":clock-jitter=0")
-        media.addOption(":clock-synchro=0")
-
-        remotePlayer = player
+        avPlayer = player
         remoteDidStartPlaying = false
         remoteStopInProgress = false
 
-        player.media = media
-        applyRemoteVolume()
+        // Observe AVPlayerItem status for load failures
+        avPlayerStatusObserver = item.observe(\.status, options: [.new]) { [weak self] item, _ in
+            guard let self, !self.remoteStopInProgress else { return }
+            if item.status == .failed {
+                Logger.error("AVPlayerItem failed: \(item.error?.localizedDescription ?? "unknown")")
+                self.handleRemotePlaybackFailure(item.error ?? AudioPlayerError.invalidFormat)
+            }
+        }
+
+        // Observe time control status (playing / paused / buffering)
+        avPlayerTimeControlObserver = player.observe(\.timeControlStatus, options: [.new]) { [weak self] player, _ in
+            self?.handleAVPlayerTimeControlStatus(player.timeControlStatus)
+        }
+
+        // Observe natural playback end
+        avPlayerItemEndObserver = NotificationCenter.default.addObserver(
+            forName: .AVPlayerItemDidPlayToEndTime,
+            object: item,
+            queue: .main
+        ) { [weak self] _ in
+            guard self?.remoteStopInProgress == false else { return }
+            self?.handleRemotePlaybackEnded()
+        }
+
+        // Observe playback failure mid-stream
+        avPlayerItemFailedObserver = NotificationCenter.default.addObserver(
+            forName: .AVPlayerItemFailedToPlayToEndTime,
+            object: item,
+            queue: .main
+        ) { [weak self] notification in
+            guard self?.remoteStopInProgress == false else { return }
+            let error = notification.userInfo?[AVPlayerItemFailedToPlayToEndTimeErrorKey] as? Error
+            Logger.error("Remote stream failed to play to end: \(error?.localizedDescription ?? "unknown")")
+            self?.handleRemotePlaybackFailure(error ?? AudioPlayerError.invalidFormat)
+        }
+
         state = startPaused ? .ready : .playing
-        player.play()
+        if !startPaused {
+            player.play()
+        }
 
         Logger.info(
             startPaused
@@ -857,19 +867,25 @@ public class PAudioPlayer: NSObject {
 
     private func teardownRemotePlayback() {
         remoteDidStartPlaying = false
-        remotePlayer?.stop()
-        remotePlayer?.media = nil
-        remotePlayer?.delegate = nil
-    }
-
-    private func sanitizedSeconds(from time: VLCTime?) -> Double {
-        guard let milliseconds = time?.value?.doubleValue else { return 0 }
-        guard milliseconds.isFinite, !milliseconds.isNaN, milliseconds >= 0 else { return 0 }
-        return milliseconds / 1000
+        // Cancel KVO observations (setting token to nil cancels the observation)
+        avPlayerStatusObserver = nil
+        avPlayerTimeControlObserver = nil
+        // Remove NotificationCenter observers
+        if let obs = avPlayerItemEndObserver {
+            NotificationCenter.default.removeObserver(obs)
+            avPlayerItemEndObserver = nil
+        }
+        if let obs = avPlayerItemFailedObserver {
+            NotificationCenter.default.removeObserver(obs)
+            avPlayerItemFailedObserver = nil
+        }
+        avPlayer?.pause()
+        avPlayer?.replaceCurrentItem(with: nil)
+        avPlayer = nil
     }
 
     private func applyRemoteVolume() {
-        remotePlayer?.audio?.volume = Int32(max(0, min(200, Int((currentVolume * 100).rounded()))))
+        avPlayer?.volume = currentVolume
     }
 
     private func redactedURLString(_ url: URL?) -> String {
@@ -911,6 +927,64 @@ public class PAudioPlayer: NSObject {
         )
     }
 
+    private func attemptLocalPlaybackRecovery(from error: Error) -> Bool {
+        guard state == .playing, isRecoverableAudioRouteError(error) else {
+            return false
+        }
+
+        let now = CFAbsoluteTimeGetCurrent()
+        guard now - lastRouteRecoveryAttemptTime > 2 else {
+            return false
+        }
+        lastRouteRecoveryAttemptTime = now
+
+        if effectsAttached {
+            Logger.warning("Audio route failed to reopen, retrying playback without inserted audio effects")
+            teardownAudioEffects()
+        } else {
+            Logger.warning("Audio route failed to reopen, retrying playback by restarting the audio engine")
+        }
+
+        do {
+            try sfbPlayer.play()
+            state = .playing
+            Logger.info("Recovered local playback after audio route change")
+            return true
+        } catch {
+            Logger.error("Failed to recover local playback after route change: \(error)")
+            return false
+        }
+    }
+
+    private func isRecoverableAudioRouteError(_ error: Error) -> Bool {
+        matchesRecoverableAudioRouteError(error as NSError)
+    }
+
+    private func matchesRecoverableAudioRouteError(_ error: NSError) -> Bool {
+        if error.code == -12860 {
+            return true
+        }
+
+        let diagnosticText = [
+            error.domain,
+            error.localizedDescription,
+            error.localizedFailureReason,
+            error.localizedRecoverySuggestion
+        ]
+        .compactMap { $0?.lowercased() }
+        .joined(separator: " ")
+
+        if diagnosticText.contains("cannot open") || diagnosticText.contains("figairplay_route") {
+            return true
+        }
+
+        if let underlyingError = error.userInfo[NSUnderlyingErrorKey] as? NSError {
+            return matchesRecoverableAudioRouteError(underlyingError)
+        }
+
+        return false
+    }
+
     private func setupAudioEffects() {
         guard !effectsAttached else {
             Logger.info("Audio effects already attached")
@@ -943,6 +1017,42 @@ public class PAudioPlayer: NSObject {
 
             effectsAttached = true
             Logger.info("Audio effects setup complete")
+        }
+    }
+
+    private func teardownAudioEffects(using engine: AVAudioEngine? = nil) {
+        guard effectsAttached || stereoWideningNode != nil || eqNode != nil else {
+            return
+        }
+
+        let detachEffects = { (engine: AVAudioEngine) in
+            let sourceNode = self.sfbPlayer.sourceNode
+            let mainMixer = self.sfbPlayer.mainMixerNode
+            let format = sourceNode.outputFormat(forBus: 0)
+
+            engine.disconnectNodeOutput(sourceNode)
+
+            if let oldStereoNode = self.stereoWideningNode {
+                engine.detach(oldStereoNode)
+                self.stereoWideningNode = nil
+            }
+
+            if let oldEQNode = self.eqNode {
+                engine.detach(oldEQNode)
+                self.eqNode = nil
+            }
+
+            engine.connect(sourceNode, to: mainMixer, format: format)
+            self.effectsAttached = false
+            Logger.info("Detached inserted audio effects and restored direct mixer path")
+        }
+
+        if let engine {
+            detachEffects(engine)
+        } else {
+            sfbPlayer.modifyProcessingGraph { engine in
+                detachEffects(engine)
+            }
         }
     }
 
@@ -1039,22 +1149,5 @@ private class SFBAudioPlayerDelegateBridge: NSObject, SFBAudioEngine.AudioPlayer
         with format: AVAudioFormat
     ) -> AVAudioNode {
         owner?.reconfigureAudioGraph(engine: engine, format: format) ?? engine.mainMixerNode
-    }
-}
-
-private class VLCMediaPlayerDelegateBridge: NSObject, VLCMediaPlayerDelegate {
-    weak var owner: PAudioPlayer?
-
-    init(owner: PAudioPlayer) {
-        self.owner = owner
-        super.init()
-    }
-
-    func mediaPlayerStateChanged(_ aNotification: Notification) {
-        owner?.handleRemoteStateChanged()
-    }
-
-    func mediaPlayerTimeChanged(_ aNotification: Notification) {
-        owner?.handleRemoteTimeChanged()
     }
 }
