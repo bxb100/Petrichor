@@ -16,31 +16,42 @@ extension PlaylistManager {
             return
         }
 
+        guard let dbManager = libraryManager?.databaseManager else {
+            Logger.error("Cannot update favorite - no database manager")
+            return
+        }
+
         let updatedTrack = track.withFavoriteStatus(isFavorite)
 
         do {
-            if let dbManager = libraryManager?.databaseManager {
-                try await dbManager.updateTrackFavoriteStatus(trackId: trackId, isFavorite: isFavorite)
+            try await dbManager.updateTrackFavoriteStatus(trackId: trackId, isFavorite: isFavorite)
 
-                Logger.info("Updated favorite status for track: \(track.title) to \(isFavorite)")
-                
-                await handleTrackPropertyUpdate(updatedTrack)
-                
+            Logger.info("Updated favorite status for track: \(track.title) to \(isFavorite)")
+
+            await handleTrackPropertyUpdate(updatedTrack)
+            await publishFavoriteStatusChanged(updatedTrack)
+            await refreshFavoritesSmartPlaylistIfNeeded()
+
+            guard let libraryManager,
+                  libraryManager.shouldSyncFavoriteStateRemotely(for: track) else {
+                return
+            }
+
+            do {
+                try await libraryManager.syncRemoteFavoriteStatus(for: track, isFavorite: isFavorite)
+            } catch {
+                Logger.error("Failed to sync remote favorite status: \(error)")
+
+                try await dbManager.updateTrackFavoriteStatus(trackId: trackId, isFavorite: track.isFavorite)
+                await handleTrackPropertyUpdate(track)
+                await publishFavoriteStatusChanged(track)
+                await refreshFavoritesSmartPlaylistIfNeeded()
+
                 await MainActor.run {
-                    NotificationCenter.default.post(
-                        name: .trackFavoriteStatusChanged,
-                        object: nil,
-                        userInfo: ["track": updatedTrack]
+                    NotificationManager.shared.addMessage(
+                        .warning,
+                        "Failed to sync favorite state for '\(track.title)'."
                     )
-                }
-                
-                if let favoritesIndex = playlists.firstIndex(where: {
-                    $0.name == DefaultPlaylists.favorites && $0.type == .smart
-                }) {
-                    Task.detached(priority: .background) { [weak self] in
-                        guard let self = self else { return }
-                        await self.loadSmartPlaylistTracks(self.playlists[favoritesIndex])
-                    }
                 }
             }
         } catch {
@@ -156,5 +167,25 @@ extension PlaylistManager {
     func handleTrackPlaybackCompleted(_ track: Track) {
         // Increment play count when track completes
         incrementPlayCount(for: track)
+    }
+
+    @MainActor
+    private func publishFavoriteStatusChanged(_ track: Track) {
+        NotificationCenter.default.post(
+            name: .trackFavoriteStatusChanged,
+            object: nil,
+            userInfo: ["track": track]
+        )
+    }
+
+    private func refreshFavoritesSmartPlaylistIfNeeded() async {
+        guard let favoritesIndex = playlists.firstIndex(where: {
+            $0.name == DefaultPlaylists.favorites && $0.type == .smart
+        }) else {
+            return
+        }
+
+        let playlist = playlists[favoritesIndex]
+        await loadSmartPlaylistTracks(playlist)
     }
 }

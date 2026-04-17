@@ -4,6 +4,7 @@ import GRDB
 enum LibrarySourceKind: String, Codable, CaseIterable, Identifiable {
     case local
     case emby
+    case navidrome
 
     var id: String { rawValue }
 
@@ -13,6 +14,8 @@ enum LibrarySourceKind: String, Codable, CaseIterable, Identifiable {
             return "Local"
         case .emby:
             return "Emby"
+        case .navidrome:
+            return "Navidrome"
         }
     }
 }
@@ -25,12 +28,17 @@ enum NetworkConnectionType: String, Codable, CaseIterable, Identifiable {
 
     var displayName: String { rawValue.uppercased() }
 
-    var defaultPort: Int {
-        switch self {
-        case .http:
-            return 8096
-        case .https:
-            return 8920
+    func defaultPort(for sourceKind: LibrarySourceKind) -> Int {
+        switch sourceKind {
+        case .local, .emby:
+            switch self {
+            case .http:
+                return 8096
+            case .https:
+                return 8920
+            }
+        case .navidrome:
+            return 4533
         }
     }
 
@@ -66,7 +74,7 @@ struct LibraryDataSource: Identifiable, Hashable, Codable, FetchableRecord, Pers
         kind: LibrarySourceKind = .emby,
         name: String = "",
         host: String = "",
-        port: Int = NetworkConnectionType.http.defaultPort,
+        port: Int = NetworkConnectionType.http.defaultPort(for: .emby),
         connectionType: NetworkConnectionType = .http,
         username: String = "",
         syncFavorites: Bool = false,
@@ -198,6 +206,7 @@ struct EmbyFavoriteCacheEntry: FetchableRecord, PersistableRecord {
 
 enum TrackLocator {
     static let embyScheme = "emby"
+    static let navidromeScheme = "navidrome"
 
     static func url(from storedValue: String) -> URL {
         if storedValue.contains("://"), let url = URL(string: storedValue) {
@@ -211,15 +220,53 @@ enum TrackLocator {
         url.isFileURL ? url.path : url.absoluteString
     }
 
+    static func makeRemoteURL(kind: LibrarySourceKind, sourceId: UUID, itemId: String) -> URL {
+        switch kind {
+        case .emby:
+            return makeEmbyURL(sourceId: sourceId, itemId: itemId)
+        case .navidrome:
+            return makeNavidromeURL(sourceId: sourceId, itemId: itemId)
+        case .local:
+            preconditionFailure("Local sources do not use remote track locators.")
+        }
+    }
+
     static func makeEmbyURL(sourceId: UUID, itemId: String) -> URL {
-        let escapedSource = sourceId.uuidString.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? sourceId.uuidString
-        let escapedItem = itemId.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? itemId
-        return URL(string: "\(embyScheme):///\(escapedSource)/\(escapedItem)")!
+        makeRemoteURL(scheme: embyScheme, sourceId: sourceId, itemId: itemId)
     }
 
     static func embyIdentifiers(from url: URL) -> (sourceId: String, itemId: String)? {
-        guard url.scheme == embyScheme else { return nil }
+        identifiers(from: url, scheme: embyScheme)
+    }
 
+    static func makeNavidromeURL(sourceId: UUID, itemId: String) -> URL {
+        makeRemoteURL(scheme: navidromeScheme, sourceId: sourceId, itemId: itemId)
+    }
+
+    static func navidromeIdentifiers(from url: URL) -> (sourceId: String, itemId: String)? {
+        identifiers(from: url, scheme: navidromeScheme)
+    }
+
+    static func remoteIdentifiers(from url: URL) -> (kind: LibrarySourceKind, sourceId: String, itemId: String)? {
+        if let identifiers = embyIdentifiers(from: url) {
+            return (.emby, identifiers.sourceId, identifiers.itemId)
+        }
+
+        if let identifiers = navidromeIdentifiers(from: url) {
+            return (.navidrome, identifiers.sourceId, identifiers.itemId)
+        }
+
+        return nil
+    }
+
+    private static func makeRemoteURL(scheme: String, sourceId: UUID, itemId: String) -> URL {
+        let escapedSource = sourceId.uuidString.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? sourceId.uuidString
+        let escapedItem = itemId.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? itemId
+        return URL(string: "\(scheme):///\(escapedSource)/\(escapedItem)")!
+    }
+
+    private static func identifiers(from url: URL, scheme: String) -> (sourceId: String, itemId: String)? {
+        guard url.scheme == scheme else { return nil }
         let pathComponents = url.pathComponents.filter { $0 != "/" }
         guard pathComponents.count >= 2 else { return nil }
 

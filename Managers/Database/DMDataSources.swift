@@ -82,6 +82,36 @@ extension DatabaseManager {
         }
     }
 
+    func updateFavoriteCache(
+        for sourceId: UUID,
+        itemId: String,
+        isFavorite: Bool,
+        cachedAt: Date = Date()
+    ) async throws {
+        try await dbQueue.write { db in
+            if isFavorite {
+                try EmbyFavoriteCacheEntry(
+                    sourceId: sourceId,
+                    itemId: itemId,
+                    cachedAt: cachedAt
+                ).save(db)
+            } else {
+                _ = try EmbyFavoriteCacheEntry
+                    .filter(EmbyFavoriteCacheEntry.Columns.sourceId == sourceId.uuidString)
+                    .filter(EmbyFavoriteCacheEntry.Columns.itemId == itemId)
+                    .deleteAll(db)
+            }
+
+            _ = try LibraryDataSource
+                .filter(LibraryDataSource.Columns.id == sourceId.uuidString)
+                .updateAll(
+                    db,
+                    LibraryDataSource.Columns.favoritesCacheUpdatedAt.set(to: cachedAt),
+                    LibraryDataSource.Columns.updatedAt.set(to: Date())
+                )
+        }
+    }
+
     func applyFavoriteState(for sourceId: UUID, favoriteItemIds: Set<String>) async throws {
         try await dbQueue.write { db in
             _ = try Track

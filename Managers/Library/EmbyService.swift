@@ -221,11 +221,41 @@ struct EmbyUserData: Decodable {
     let isFavorite: Bool?
     let playCount: Int?
     let lastPlayedDate: Date?
+    let playbackPositionTicks: Int64?
+    let played: Bool?
 
     enum CodingKeys: String, CodingKey {
         case isFavorite = "IsFavorite"
         case playCount = "PlayCount"
         case lastPlayedDate = "LastPlayedDate"
+        case playbackPositionTicks = "PlaybackPositionTicks"
+        case played = "Played"
+    }
+}
+
+private struct EmbyPlaybackReport: Encodable {
+    let canSeek: Bool
+    let itemId: String
+    let mediaType: String
+    let isPaused: Bool
+    let isMuted: Bool
+    let positionTicks: Int64?
+    let playMethod: String
+    let playSessionId: String
+    let eventName: String?
+    let queueableMediaTypes: [String]
+
+    enum CodingKeys: String, CodingKey {
+        case canSeek = "CanSeek"
+        case itemId = "ItemId"
+        case mediaType = "MediaType"
+        case isPaused = "IsPaused"
+        case isMuted = "IsMuted"
+        case positionTicks = "PositionTicks"
+        case playMethod = "PlayMethod"
+        case playSessionId = "PlaySessionId"
+        case eventName = "EventName"
+        case queueableMediaTypes = "QueueableMediaTypes"
     }
 }
 
@@ -488,6 +518,167 @@ actor EmbyService {
         return response.items ?? []
     }
 
+    func fetchAudioItem(
+        source: LibraryDataSource,
+        session embySession: EmbySession,
+        itemId: String
+    ) async throws -> EmbyAudioItem {
+        let request = try makeRequest(
+            source: source,
+            path: "/Users/\(embySession.userId)/Items/\(itemId)",
+            method: "GET",
+            token: embySession.accessToken,
+            queryItems: [
+                URLQueryItem(name: "Fields", value: "DateModified"),
+                URLQueryItem(name: "EnableUserData", value: "true")
+            ],
+            useAuthorizationHeader: true,
+            userId: embySession.userId
+        )
+
+        return try await perform(request)
+    }
+
+    func setFavorite(
+        source: LibraryDataSource,
+        session embySession: EmbySession,
+        itemId: String,
+        isFavorite: Bool
+    ) async throws {
+        let request = try makeRequest(
+            source: source,
+            path: "/Users/\(embySession.userId)/FavoriteItems/\(itemId)",
+            method: isFavorite ? "POST" : "DELETE",
+            token: embySession.accessToken,
+            useAuthorizationHeader: true,
+            userId: embySession.userId
+        )
+
+        try await performVoid(request)
+    }
+
+    func reportPlaybackStarted(
+        source: LibraryDataSource,
+        session embySession: EmbySession,
+        itemId: String,
+        positionTicks: Int64?,
+        isPaused: Bool,
+        playSessionId: String
+    ) async throws {
+        let body = EmbyPlaybackReport(
+            canSeek: true,
+            itemId: itemId,
+            mediaType: "Audio",
+            isPaused: isPaused,
+            isMuted: false,
+            positionTicks: positionTicks,
+            playMethod: "DirectPlay",
+            playSessionId: playSessionId,
+            eventName: nil,
+            queueableMediaTypes: ["Audio"]
+        )
+
+        let request = try makeRequest(
+            source: source,
+            path: "/Users/\(embySession.userId)/PlayingItems/\(itemId)",
+            method: "POST",
+            token: embySession.accessToken,
+            body: body,
+            queryItems: playbackQueryItems(
+                positionTicks: positionTicks,
+                isPaused: isPaused,
+                playSessionId: playSessionId
+            ),
+            useAuthorizationHeader: true,
+            userId: embySession.userId
+        )
+
+        try await performVoid(request)
+    }
+
+    func reportPlaybackProgress(
+        source: LibraryDataSource,
+        session embySession: EmbySession,
+        itemId: String,
+        positionTicks: Int64?,
+        isPaused: Bool,
+        playSessionId: String,
+        eventName: String = "TimeUpdate"
+    ) async throws {
+        let body = EmbyPlaybackReport(
+            canSeek: true,
+            itemId: itemId,
+            mediaType: "Audio",
+            isPaused: isPaused,
+            isMuted: false,
+            positionTicks: positionTicks,
+            playMethod: "DirectPlay",
+            playSessionId: playSessionId,
+            eventName: eventName,
+            queueableMediaTypes: ["Audio"]
+        )
+
+        let request = try makeRequest(
+            source: source,
+            path: "/Users/\(embySession.userId)/PlayingItems/\(itemId)/Progress",
+            method: "POST",
+            token: embySession.accessToken,
+            body: body,
+            queryItems: playbackQueryItems(
+                positionTicks: positionTicks,
+                isPaused: isPaused,
+                playSessionId: playSessionId,
+                eventName: eventName
+            ),
+            useAuthorizationHeader: true,
+            userId: embySession.userId
+        )
+
+        try await performVoid(request)
+    }
+
+    func reportPlaybackStopped(
+        source: LibraryDataSource,
+        session embySession: EmbySession,
+        itemId: String,
+        positionTicks: Int64?,
+        playSessionId: String
+    ) async throws {
+        let request = try makeRequest(
+            source: source,
+            path: "/Users/\(embySession.userId)/PlayingItems/\(itemId)",
+            method: "DELETE",
+            token: embySession.accessToken,
+            queryItems: playbackQueryItems(
+                positionTicks: positionTicks,
+                isPaused: true,
+                playSessionId: playSessionId,
+                nextMediaType: "Audio"
+            ),
+            useAuthorizationHeader: true,
+            userId: embySession.userId
+        )
+
+        try await performVoid(request)
+    }
+
+    func markPlayed(
+        source: LibraryDataSource,
+        session embySession: EmbySession,
+        itemId: String
+    ) async throws {
+        let request = try makeRequest(
+            source: source,
+            path: "/Users/\(embySession.userId)/PlayedItems/\(itemId)",
+            method: "POST",
+            token: embySession.accessToken,
+            useAuthorizationHeader: true,
+            userId: embySession.userId
+        )
+
+        try await performVoid(request)
+    }
+
     func downloadPrimaryImageData(
         source: LibraryDataSource,
         session embySession: EmbySession,
@@ -624,6 +815,35 @@ actor EmbyService {
         return formatter.string(from: date)
     }
 
+    private func playbackQueryItems(
+        positionTicks: Int64?,
+        isPaused: Bool,
+        playSessionId: String,
+        eventName: String? = nil,
+        nextMediaType: String? = nil
+    ) -> [URLQueryItem] {
+        var queryItems: [URLQueryItem] = [
+            URLQueryItem(name: "PlayMethod", value: "DirectPlay"),
+            URLQueryItem(name: "IsPaused", value: isPaused ? "true" : "false"),
+            URLQueryItem(name: "IsMuted", value: "false"),
+            URLQueryItem(name: "PlaySessionId", value: playSessionId)
+        ]
+
+        if let positionTicks {
+            queryItems.append(URLQueryItem(name: "PositionTicks", value: String(positionTicks)))
+        }
+
+        if let eventName, !eventName.isEmpty {
+            queryItems.append(URLQueryItem(name: "EventName", value: eventName))
+        }
+
+        if let nextMediaType, !nextMediaType.isEmpty {
+            queryItems.append(URLQueryItem(name: "NextMediaType", value: nextMediaType))
+        }
+
+        return queryItems
+    }
+
     private func makeRequest(
         source: LibraryDataSource,
         path: String,
@@ -715,6 +935,38 @@ actor EmbyService {
         } catch {
             Logger.error("Failed to decode Emby response: \(error)")
             throw EmbyServiceError.invalidResponse
+        }
+    }
+
+    private func performVoid(_ request: URLRequest) async throws {
+        let data: Data
+        let response: URLResponse
+
+        do {
+            (data, response) = try await session.data(for: request)
+        } catch let urlError as URLError {
+            if urlError.code == .appTransportSecurityRequiresSecureConnection {
+                throw EmbyServiceError.requestFailed(
+                    "HTTP connections are blocked by App Transport Security. Please restart Petrichor after updating to a build that enables HTTP Emby sources."
+                )
+            }
+
+            throw EmbyServiceError.requestFailed(urlError.localizedDescription)
+        } catch {
+            throw EmbyServiceError.requestFailed(error.localizedDescription)
+        }
+
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw EmbyServiceError.invalidResponse
+        }
+
+        guard (200..<300).contains(httpResponse.statusCode) else {
+            if httpResponse.statusCode == 401 {
+                throw EmbyServiceError.invalidCredentials
+            }
+
+            let serverMessage = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
+            throw EmbyServiceError.requestFailed(serverMessage?.isEmpty == false ? serverMessage! : "Emby request failed with status \(httpResponse.statusCode).")
         }
     }
 

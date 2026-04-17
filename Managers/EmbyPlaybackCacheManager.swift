@@ -1,7 +1,12 @@
 import Foundation
 
-actor EmbyPlaybackCacheManager {
-    static let progressDidChangeNotification = Notification.Name("EmbyPlaybackCacheProgressDidChange")
+struct RemotePlaybackProvider: Sendable {
+    let playbackURL: @Sendable (Track) async throws -> URL
+    let downloadAudio: @Sendable (Track, URL, @escaping @Sendable (Double) -> Void) async throws -> URL
+}
+
+actor RemotePlaybackCacheManager {
+    static let progressDidChangeNotification = Notification.Name("RemotePlaybackCacheProgressDidChange")
 
     private var activeDownloads: [String: Task<URL, Error>] = [:]
     private var downloadProgress: [String: Double] = [:]
@@ -10,14 +15,12 @@ actor EmbyPlaybackCacheManager {
 
     init() {
         let cachesRoot = fileManager.urls(for: .cachesDirectory, in: .userDomainMask).first!
-        self.cacheDirectoryURL = cachesRoot.appendingPathComponent("Petrichor/EmbyPlaybackCache", isDirectory: true)
+        self.cacheDirectoryURL = cachesRoot.appendingPathComponent("Petrichor/RemotePlaybackCache", isDirectory: true)
     }
 
     func playableURL(
         for track: Track,
-        source: LibraryDataSource,
-        session: EmbySession,
-        service: EmbyService
+        provider: RemotePlaybackProvider
     ) async throws -> URL {
         let key = cacheKey(for: track)
         let destinationURL = cachedFileURL(for: track)
@@ -32,9 +35,7 @@ actor EmbyPlaybackCacheManager {
         let task = downloadTask(
             key: key,
             track: track,
-            source: source,
-            session: session,
-            service: service,
+            provider: provider,
             destinationURL: destinationURL
         )
 
@@ -43,14 +44,12 @@ actor EmbyPlaybackCacheManager {
             return try await task.value
         }
 
-        return try await service.makePlaybackURL(source: source, session: session, track: track)
+        return try await provider.playbackURL(track)
     }
 
     func prefetch(
         track: Track,
-        source: LibraryDataSource,
-        session: EmbySession,
-        service: EmbyService
+        provider: RemotePlaybackProvider
     ) async {
         let key = cacheKey(for: track)
         let destinationURL = cachedFileURL(for: track)
@@ -63,16 +62,14 @@ actor EmbyPlaybackCacheManager {
         do {
             try ensureCacheDirectoryExists()
         } catch {
-            Logger.error("Failed to create Emby cache directory: \(error)")
+            Logger.error("Failed to create remote playback cache directory: \(error)")
             return
         }
 
         _ = downloadTask(
             key: key,
             track: track,
-            source: source,
-            session: session,
-            service: service,
+            provider: provider,
             destinationURL: destinationURL
         )
     }
@@ -101,8 +98,9 @@ actor EmbyPlaybackCacheManager {
     }
 
     static func progressKey(for track: Track) -> String {
-        let sourceComponent = track.sourceId ?? TrackLocator.embyIdentifiers(from: track.url)?.sourceId ?? "unknown-source"
-        let itemComponent = track.remoteItemId ?? TrackLocator.embyIdentifiers(from: track.url)?.itemId ?? UUID().uuidString
+        let identifiers = TrackLocator.remoteIdentifiers(from: track.url)
+        let sourceComponent = track.sourceId ?? identifiers?.sourceId ?? "unknown-source"
+        let itemComponent = track.remoteItemId ?? identifiers?.itemId ?? UUID().uuidString
         return "\(sourceComponent)_\(itemComponent)"
             .replacingOccurrences(of: "/", with: "_")
             .replacingOccurrences(of: ":", with: "_")
@@ -130,9 +128,7 @@ actor EmbyPlaybackCacheManager {
     private func downloadTask(
         key: String,
         track: Track,
-        source: LibraryDataSource,
-        session: EmbySession,
-        service: EmbyService,
+        provider: RemotePlaybackProvider,
         destinationURL: URL
     ) -> Task<URL, Error> {
         if fileManager.fileExists(atPath: destinationURL.path) {
@@ -145,18 +141,12 @@ actor EmbyPlaybackCacheManager {
 
         let task = Task<URL, Error> {
             self.publishProgress(0, for: key)
-            return try await service.downloadAudio(
-                source: source,
-                session: session,
-                track: track,
-                destinationURL: destinationURL,
-                progressHandler: { [weak self] progress in
-                    guard let self else { return }
-                    Task {
-                        await self.publishProgress(progress, for: key)
-                    }
+            return try await provider.downloadAudio(track, destinationURL) { [weak self] progress in
+                guard let self else { return }
+                Task {
+                    await self.publishProgress(progress, for: key)
                 }
-            )
+            }
         }
         activeDownloads[key] = task
 

@@ -454,8 +454,9 @@ extension Track {
             return fullTrack
         }
 
-        let resolvedSourceId = sourceId ?? TrackLocator.embyIdentifiers(from: url)?.sourceId
-        let resolvedRemoteItemId = remoteItemId ?? TrackLocator.embyIdentifiers(from: url)?.itemId
+        let resolvedIdentifiers = TrackLocator.remoteIdentifiers(from: url)
+        let resolvedSourceId = sourceId ?? resolvedIdentifiers?.sourceId
+        let resolvedRemoteItemId = remoteItemId ?? resolvedIdentifiers?.itemId
 
         guard let resolvedSourceId, let resolvedRemoteItemId else { return nil }
 

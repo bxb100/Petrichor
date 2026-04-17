@@ -12,6 +12,30 @@ enum KeychainManager {
         static func embyAccessTokenKey(for sourceId: UUID) -> String {
             "org.Petrichor.emby.\(sourceId.uuidString).accessToken"
         }
+
+        static func navidromePasswordKey(for sourceId: UUID) -> String {
+            "org.Petrichor.navidrome.\(sourceId.uuidString).password"
+        }
+
+        static func passwordKey(for sourceId: UUID, kind: LibrarySourceKind) -> String? {
+            switch kind {
+            case .emby:
+                return embyPasswordKey(for: sourceId)
+            case .navidrome:
+                return navidromePasswordKey(for: sourceId)
+            case .local:
+                return nil
+            }
+        }
+
+        static func accessTokenKey(for sourceId: UUID, kind: LibrarySourceKind) -> String? {
+            switch kind {
+            case .emby:
+                return embyAccessTokenKey(for: sourceId)
+            case .navidrome, .local:
+                return nil
+            }
+        }
     }
     
     // MARK: - Save

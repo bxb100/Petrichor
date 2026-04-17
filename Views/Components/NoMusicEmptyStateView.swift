@@ -141,7 +141,7 @@ struct NoMusicEmptyStateView: View {
                     .fontWeight(.semibold)
 
                 VStack(spacing: 8) {
-                    Text("Add local folders or configure an Emby source to get started")
+                    Text("Add local folders or configure a remote source to get started")
                         .font(.title3)
                         .foregroundColor(.secondary)
 
@@ -175,7 +175,7 @@ struct NoMusicEmptyStateView: View {
                     HStack(spacing: 6) {
                         Image(systemName: "externaldrive.connected.to.line.below")
                             .font(.system(size: 16))
-                        Text("Configure Emby")
+                        Text("Configure Sources")
                             .font(.system(size: 14, weight: .medium))
                     }
                     .padding(.horizontal, 20)

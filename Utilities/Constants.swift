@@ -200,6 +200,11 @@ enum TimeConstants {
     static let searchDebounceDuration: UInt64 = 350_000_000
     static let stateSaveTimerDuration: Double = 30.0
     static let playbackProgressTimerDuration: Double = 10.0
+    static let remoteSourceRevalidationInterval: TimeInterval = 15 * 60
+    static let remotePlaybackFlushInterval: TimeInterval = 12
+    static let remotePlaybackPollInterval: TimeInterval = 15
+    static let remotePlaybackInteractionCooldown: TimeInterval = 5
+    static let remotePlaybackDriftThreshold: Double = 8
     static let oneHour: TimeInterval = 60 * 60
     static let twentyFourHours: TimeInterval = 24 * oneHour
     static let pauseHibernationThreshold: TimeInterval = 5 * 60

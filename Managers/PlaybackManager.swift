@@ -9,11 +9,45 @@
 import AVFoundation
 import Foundation
 
+enum RemotePlaybackProgressEvent: String {
+    case timeUpdate = "TimeUpdate"
+    case pause = "Pause"
+    case unpause = "Unpause"
+}
+
+enum RemotePlaybackSyncPhase {
+    case started
+    case progress(RemotePlaybackProgressEvent)
+    case stopped(finished: Bool)
+}
+
+struct RemotePlaybackSyncState {
+    let track: Track
+    let position: Double
+    let duration: Double
+    let isPaused: Bool
+    let queueItemIds: [String]
+    let currentItemId: String?
+    let playSessionId: String
+    let startedAt: Date
+}
+
+struct RemotePlaybackServerState {
+    let currentItemId: String?
+    let position: Double
+    let lastUpdatedAt: Date?
+}
+
 class PlaybackManager: NSObject, ObservableObject {
     private struct PendingStartupSeek {
         let playbackURL: URL
         let trackTitle: String
         let position: Double
+    }
+
+    private struct BufferedRemotePlaybackUpdate {
+        let state: RemotePlaybackSyncState
+        let phase: RemotePlaybackSyncPhase
     }
 
     let playbackProgressState = PlaybackProgressState()
@@ -81,7 +115,13 @@ class PlaybackManager: NSObject, ObservableObject {
     private var pendingProgressSyncTime: Double?
     private var pendingProgressSyncDeadline: CFAbsoluteTime = 0
     private var cacheProgressObserver: NSObjectProtocol?
-    
+    private var remotePlaybackFlushTimer: Timer?
+    private var remotePlaybackPollTimer: Timer?
+    private var remotePlaybackStartedAt: Date?
+    private var remotePlaybackPlaySessionId: String?
+    private var bufferedRemotePlaybackUpdate: BufferedRemotePlaybackUpdate?
+    private var remotePlaybackSuppressPollingUntil: Date = .distantPast
+
     // MARK: - Dependencies
     
     private let libraryManager: LibraryManager
@@ -116,6 +156,7 @@ class PlaybackManager: NSObject, ObservableObject {
         stop()
         stopProgressUpdateTimer()
         stopStateSaveTimer()
+        stopRemotePlaybackTimers()
     }
     
     // MARK: - Player State Management
@@ -179,6 +220,15 @@ class PlaybackManager: NSObject, ObservableObject {
     // MARK: - Playback Controls
     
     func playTrack(_ track: Track) {
+        if let previousTrack = currentTrack,
+           previousTrack.trackId != track.trackId {
+            finalizeRemotePlaybackSync(
+                for: previousTrack,
+                finished: false,
+                position: effectiveCurrentTime
+            )
+        }
+
         cancelRemotePlaybackResolution()
         restoredUITrack = nil
         restoredPosition = 0
@@ -241,9 +291,14 @@ class PlaybackManager: NSObject, ObservableObject {
         }
         
         updateNowPlayingInfo()
+        let event: RemotePlaybackProgressEvent = isPlaying ? .unpause : .pause
+        pushImmediateRemotePlaybackUpdate(event: event)
     }
     
     func stop() {
+        if let track = currentTrack {
+            finalizeRemotePlaybackSync(for: track, finished: false, position: effectiveCurrentTime)
+        }
         cancelScheduledSeek()
         cancelDeferredSeek()
         cancelRemotePlaybackResolution()
@@ -257,10 +312,14 @@ class PlaybackManager: NSObject, ObservableObject {
         isPlaying = false
         restoredPosition = 0
         stopStateSaveTimer()
+        stopRemotePlaybackTimers()
         Logger.info("Playback stopped")
     }
     
     func stopGracefully() {
+        if let track = currentTrack {
+            finalizeRemotePlaybackSync(for: track, finished: false, position: effectiveCurrentTime)
+        }
         cancelScheduledSeek()
         cancelDeferredSeek()
         cancelRemotePlaybackResolution()
@@ -273,6 +332,7 @@ class PlaybackManager: NSObject, ObservableObject {
         bufferedProgress = 0
         isPlaying = false
         stopStateSaveTimer()
+        stopRemotePlaybackTimers()
         Logger.info("Playback stopped gracefully")
     }
     
@@ -300,6 +360,8 @@ class PlaybackManager: NSObject, ObservableObject {
                 track: track, currentTime: clampedTime, isPlaying: isPlaying)
             lastNowPlayingInfoUpdateTime = CFAbsoluteTimeGetCurrent()
         }
+
+        pushImmediateRemotePlaybackUpdate(event: .timeUpdate)
     }
 
     func scheduleSeekTo(time: Double, debounceInterval: TimeInterval = 0.12) {
@@ -505,6 +567,11 @@ class PlaybackManager: NSObject, ObservableObject {
         startStateSaveTimer()
         updateNowPlayingInfo()
         scrobbleManager?.trackStarted(lightweightTrack)
+        beginRemotePlaybackSync(
+            for: lightweightTrack,
+            initialPosition: seekToPosition,
+            isPaused: seekToPosition > 0
+        )
 
         Task {
             await libraryManager.prefetchRemoteTracks(
@@ -552,7 +619,7 @@ class PlaybackManager: NSObject, ObservableObject {
 
     private func observePlaybackCacheProgress() {
         cacheProgressObserver = NotificationCenter.default.addObserver(
-            forName: EmbyPlaybackCacheManager.progressDidChangeNotification,
+            forName: RemotePlaybackCacheManager.progressDidChangeNotification,
             object: nil,
             queue: .main
         ) { [weak self] notification in
@@ -568,8 +635,8 @@ class PlaybackManager: NSObject, ObservableObject {
     }
 
     private var currentPlaybackCacheProgressKey: String? {
-        guard let currentTrack, currentTrack.sourceKind == .emby else { return nil }
-        return EmbyPlaybackCacheManager.progressKey(for: currentTrack)
+        guard let currentTrack, currentTrack.isRemote else { return nil }
+        return RemotePlaybackCacheManager.progressKey(for: currentTrack)
     }
 
     private func clampedSeekTime(for time: Double) -> Double {
@@ -592,6 +659,7 @@ class PlaybackManager: NSObject, ObservableObject {
             guard let self = self, self.isPlaying else { return }
             let latestProgress = self.audioPlayer.currentPlaybackProgress
             self.currentTime = self.resolvedProgressTime(from: latestProgress)
+            self.bufferRemotePlaybackProgressIfNeeded()
 
             let now = CFAbsoluteTimeGetCurrent()
             if now - self.lastNowPlayingInfoUpdateTime >= 1 {
@@ -675,6 +743,246 @@ class PlaybackManager: NSObject, ObservableObject {
         }
 
         return pendingProgressSyncTime
+    }
+
+    private func beginRemotePlaybackSync(
+        for track: Track,
+        initialPosition: Double,
+        isPaused: Bool
+    ) {
+        guard track.isRemote else {
+            bufferedRemotePlaybackUpdate = nil
+            remotePlaybackPlaySessionId = nil
+            remotePlaybackStartedAt = nil
+            remotePlaybackSuppressPollingUntil = .distantPast
+            stopRemotePlaybackTimers()
+            return
+        }
+
+        remotePlaybackPlaySessionId = UUID().uuidString
+        remotePlaybackStartedAt = Date()
+        remotePlaybackSuppressPollingUntil = Date().addingTimeInterval(TimeConstants.remotePlaybackInteractionCooldown)
+        startRemotePlaybackTimers()
+
+        guard let state = makeRemotePlaybackSyncState(
+            for: track,
+            position: initialPosition,
+            isPaused: isPaused
+        ) else {
+            return
+        }
+
+        enqueueRemotePlaybackUpdate(state: state, phase: .started)
+        flushBufferedRemotePlaybackUpdateIfNeeded()
+    }
+
+    private func finalizeRemotePlaybackSync(
+        for track: Track,
+        finished: Bool,
+        position: Double
+    ) {
+        guard track.isRemote else {
+            bufferedRemotePlaybackUpdate = nil
+            remotePlaybackPlaySessionId = nil
+            remotePlaybackStartedAt = nil
+            stopRemotePlaybackTimers()
+            return
+        }
+
+        if let state = makeRemotePlaybackSyncState(
+            for: track,
+            position: position,
+            isPaused: true
+        ) {
+            enqueueRemotePlaybackUpdate(state: state, phase: .stopped(finished: finished))
+            flushBufferedRemotePlaybackUpdateIfNeeded()
+        }
+
+        remotePlaybackPlaySessionId = nil
+        remotePlaybackStartedAt = nil
+        remotePlaybackSuppressPollingUntil = .distantPast
+        stopRemotePlaybackTimers()
+    }
+
+    private func bufferRemotePlaybackProgressIfNeeded() {
+        guard let track = currentTrack,
+              let state = makeRemotePlaybackSyncState(for: track) else {
+            return
+        }
+
+        enqueueRemotePlaybackUpdate(state: state, phase: .progress(.timeUpdate))
+    }
+
+    private func pushImmediateRemotePlaybackUpdate(event: RemotePlaybackProgressEvent) {
+        guard let track = currentTrack,
+              let state = makeRemotePlaybackSyncState(
+                for: track,
+                isPaused: !isPlaying
+              ) else {
+            return
+        }
+
+        remotePlaybackSuppressPollingUntil = Date().addingTimeInterval(TimeConstants.remotePlaybackInteractionCooldown)
+        enqueueRemotePlaybackUpdate(state: state, phase: .progress(event))
+        flushBufferedRemotePlaybackUpdateIfNeeded()
+    }
+
+    private func makeRemotePlaybackSyncState(
+        for track: Track,
+        position: Double? = nil,
+        isPaused: Bool? = nil
+    ) -> RemotePlaybackSyncState? {
+        guard track.isRemote,
+              let currentItemId = track.remoteItemId,
+              let playSessionId = remotePlaybackPlaySessionId,
+              let startedAt = remotePlaybackStartedAt else {
+            return nil
+        }
+
+        return RemotePlaybackSyncState(
+            track: track,
+            position: max(0, position ?? effectiveCurrentTime),
+            duration: track.duration,
+            isPaused: isPaused ?? !isPlaying,
+            queueItemIds: remoteQueueItemIds(for: track),
+            currentItemId: currentItemId,
+            playSessionId: playSessionId,
+            startedAt: startedAt
+        )
+    }
+
+    private func remoteQueueItemIds(for track: Track) -> [String] {
+        let queueItemIds = playlistManager.currentQueue.compactMap { candidate -> String? in
+            guard candidate.sourceKind == track.sourceKind,
+                  candidate.sourceId == track.sourceId,
+                  let itemId = candidate.remoteItemId else {
+                return nil
+            }
+
+            return itemId
+        }
+
+        if !queueItemIds.isEmpty {
+            return queueItemIds
+        }
+
+        if let currentItemId = track.remoteItemId {
+            return [currentItemId]
+        }
+
+        return []
+    }
+
+    private func enqueueRemotePlaybackUpdate(
+        state: RemotePlaybackSyncState,
+        phase: RemotePlaybackSyncPhase
+    ) {
+        if case .stopped = bufferedRemotePlaybackUpdate?.phase,
+           case .progress = phase {
+            return
+        }
+
+        bufferedRemotePlaybackUpdate = BufferedRemotePlaybackUpdate(state: state, phase: phase)
+    }
+
+    private func flushBufferedRemotePlaybackUpdateIfNeeded() {
+        guard let update = bufferedRemotePlaybackUpdate else { return }
+        bufferedRemotePlaybackUpdate = nil
+
+        Task { [weak self] in
+            guard let self else { return }
+
+            do {
+                try await self.libraryManager.reportRemotePlayback(update.state, phase: update.phase)
+            } catch {
+                Logger.warning("Failed to sync remote playback state: \(error)")
+                await MainActor.run {
+                    if self.bufferedRemotePlaybackUpdate == nil {
+                        self.bufferedRemotePlaybackUpdate = update
+                    }
+
+                    if self.remotePlaybackFlushTimer == nil {
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
+                            self?.flushBufferedRemotePlaybackUpdateIfNeeded()
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private func startRemotePlaybackTimers() {
+        stopRemotePlaybackTimers()
+
+        remotePlaybackFlushTimer = Timer.scheduledTimer(
+            withTimeInterval: TimeConstants.remotePlaybackFlushInterval,
+            repeats: true
+        ) { [weak self] _ in
+            self?.flushBufferedRemotePlaybackUpdateIfNeeded()
+        }
+
+        remotePlaybackPollTimer = Timer.scheduledTimer(
+            withTimeInterval: TimeConstants.remotePlaybackPollInterval,
+            repeats: true
+        ) { [weak self] _ in
+            self?.pollRemotePlaybackStateIfNeeded()
+        }
+    }
+
+    private func stopRemotePlaybackTimers() {
+        remotePlaybackFlushTimer?.invalidate()
+        remotePlaybackFlushTimer = nil
+        remotePlaybackPollTimer?.invalidate()
+        remotePlaybackPollTimer = nil
+    }
+
+    private func pollRemotePlaybackStateIfNeeded() {
+        guard Date() >= remotePlaybackSuppressPollingUntil,
+              let track = currentTrack,
+              let state = makeRemotePlaybackSyncState(for: track) else {
+            return
+        }
+
+        Task { [weak self] in
+            guard let self else { return }
+
+            do {
+                guard let serverState = try await self.libraryManager.fetchRemotePlaybackState(for: state) else {
+                    return
+                }
+
+                await MainActor.run {
+                    self.applyRemotePlaybackState(serverState, expectedTrack: state.track)
+                }
+            } catch {
+                Logger.warning("Failed to poll remote playback state: \(error)")
+            }
+        }
+    }
+
+    private func applyRemotePlaybackState(
+        _ serverState: RemotePlaybackServerState,
+        expectedTrack: Track
+    ) {
+        guard let currentTrack,
+              currentTrack.trackId == expectedTrack.trackId,
+              let remoteItemId = currentTrack.remoteItemId else {
+            return
+        }
+
+        if let currentItemId = serverState.currentItemId,
+           currentItemId != remoteItemId {
+            return
+        }
+
+        let remotePosition = max(0, serverState.position)
+        guard remotePosition > 0 else { return }
+        guard abs(remotePosition - effectiveCurrentTime) >= TimeConstants.remotePlaybackDriftThreshold else {
+            return
+        }
+
+        remotePlaybackSuppressPollingUntil = Date().addingTimeInterval(TimeConstants.remotePlaybackInteractionCooldown)
+        seekTo(time: remotePosition)
     }
     
     private func startStateSaveTimer() {
@@ -789,8 +1097,18 @@ extension PlaybackManager: AudioPlayerDelegate {
             }
             
             Logger.info("Track finished (reason: \(stopReason))")
+
+            let finishedNaturally = stopReason == .eof
+            let stoppedPosition = finishedNaturally
+                ? max(max(progress, duration), self.effectiveCurrentTime)
+                : self.effectiveCurrentTime
+            self.finalizeRemotePlaybackSync(
+                for: currentTrack,
+                finished: finishedNaturally,
+                position: stoppedPosition
+            )
             
-            if stopReason == .eof {
+            if finishedNaturally {
                 self.playlistManager.incrementPlayCount(for: currentTrack)
                 self.scrobbleManager?.trackFinished(currentTrack)
                 
@@ -830,6 +1148,13 @@ extension PlaybackManager: AudioPlayerDelegate {
     func audioPlayerUnexpectedError(player: PAudioPlayer, error: AudioPlayerError) {
         DispatchQueue.main.async {
             self.pendingStartupSeek = nil
+            if let currentTrack = self.currentTrack {
+                self.finalizeRemotePlaybackSync(
+                    for: currentTrack,
+                    finished: false,
+                    position: self.effectiveCurrentTime
+                )
+            }
             Logger.error("Audio player error: \(error.localizedDescription)")
             NotificationManager.shared.addMessage(.error, "Playback error: \(error.localizedDescription)")
         }

@@ -52,12 +52,24 @@ struct SourcesTabView: View {
                 prepareNewSource()
             }
         }
+        .onChange(of: draft.kind) { oldKind, newKind in
+            let oldDefaultPort = draft.connectionType.defaultPort(for: oldKind)
+            if selectedExistingSource == nil || draft.port == oldDefaultPort {
+                draft.port = draft.connectionType.defaultPort(for: newKind)
+            }
+        }
+        .onChange(of: draft.connectionType) { oldType, newType in
+            let oldDefaultPort = oldType.defaultPort(for: draft.kind)
+            if selectedExistingSource == nil || draft.port == oldDefaultPort {
+                draft.port = newType.defaultPort(for: draft.kind)
+            }
+        }
         .alert(item: $activeAlert) { alert in
             switch alert {
             case .delete:
                 Alert(
-                    title: Text("Delete Emby Source?"),
-                    message: Text("This removes the source configuration, favorites cache, and all synced Emby tracks from Petrichor."),
+                    title: Text("Delete \(selectedSourceKind.displayName) Source?"),
+                    message: Text("This removes the source configuration, favorites cache, and all synced \(selectedSourceKind.displayName) tracks from Petrichor."),
                     primaryButton: .destructive(Text("Delete")) {
                         Task {
                             await deleteSelectedSource()
@@ -67,8 +79,8 @@ struct SourcesTabView: View {
                 )
             case .rebuild:
                 Alert(
-                    title: Text("Rebuild Emby Index?"),
-                    message: Text("This forces a full resync for the selected Emby source and rebuilds Petrichor's local index for its tracks."),
+                    title: Text("Rebuild \(selectedSourceKind.displayName) Index?"),
+                    message: Text("This forces a full resync for the selected \(selectedSourceKind.displayName) source and rebuilds Petrichor's local index for its tracks."),
                     primaryButton: .default(Text("Rebuild")) {
                         Task {
                             await rebuildSelectedSourceIndex()
@@ -87,7 +99,7 @@ struct SourcesTabView: View {
                     VStack(alignment: .leading, spacing: 2) {
                         Text(source.name.isEmpty ? "Untitled Source" : source.name)
                             .font(.system(size: 13, weight: .medium))
-                        Text("\(source.connectionType.displayName) • \(source.host):\(source.port)")
+                        Text("\(source.kind.displayName) • \(source.connectionType.displayName) • \(source.host):\(source.port)")
                             .font(.system(size: 11))
                             .foregroundColor(.secondary)
                             .lineLimit(1)
@@ -124,15 +136,17 @@ struct SourcesTabView: View {
         ScrollView {
             Form {
                 Section("Type") {
-                    LabeledContent("Source Type") {
-                        Text("Emby")
-                            .foregroundColor(.secondary)
+                    Picker("Source Type", selection: $draft.kind) {
+                        ForEach(remoteSourceKinds) { kind in
+                            Text(kind.displayName).tag(kind)
+                        }
                     }
+                    .pickerStyle(.segmented)
                 }
 
                 Section("Connection") {
                     TextField("Source Name", text: $draft.name)
-                    TextField("IP or Domain", text: $draft.host)
+                    TextField("Host or Domain", text: $draft.host)
 
                     HStack(alignment: .center, spacing: 12) {
                         Picker("Connection", selection: $draft.connectionType) {
@@ -158,7 +172,7 @@ struct SourcesTabView: View {
                 }
 
                 Section("Playback & Sync") {
-                    Toggle("Sync Emby favorites", isOn: $draft.syncFavorites)
+                    Toggle("Sync favorites", isOn: $draft.syncFavorites)
 
                     if draft.syncFavorites {
                         HStack {
@@ -232,7 +246,7 @@ struct SourcesTabView: View {
                             }
                         }
 
-                        Text("Emby sources sync automatically after save and refresh every 24 hours.")
+                        Text("Remote sources sync automatically after save and refresh every 24 hours.")
                             .font(.system(size: 12))
                             .foregroundColor(.secondary)
                     }
@@ -271,6 +285,14 @@ struct SourcesTabView: View {
         return libraryManager.dataSources.first(where: { $0.id == selectedSourceID })
     }
 
+    private var selectedSourceKind: LibrarySourceKind {
+        draft.kind
+    }
+
+    private var remoteSourceKinds: [LibrarySourceKind] {
+        LibrarySourceKind.allCases.filter { $0 != .local }
+    }
+
     private var favoritesTTLMinutes: Binding<Int> {
         Binding(
             get: { max(5, draft.favoritesCacheTTLSeconds / 60) },
@@ -293,7 +315,7 @@ struct SourcesTabView: View {
             kind: .emby,
             name: "",
             host: "",
-            port: connectionType.defaultPort,
+            port: connectionType.defaultPort(for: .emby),
             connectionType: connectionType,
             username: "",
             syncFavorites: false,
@@ -313,7 +335,7 @@ struct SourcesTabView: View {
     private func saveSource() {
         isSaving = true
         Task {
-            let didSave = await libraryManager.saveEmbySource(draft, password: password)
+            let didSave = await libraryManager.saveRemoteSource(draft, password: password)
             await MainActor.run {
                 isSaving = false
                 if didSave {
@@ -330,7 +352,7 @@ struct SourcesTabView: View {
             isRebuilding = true
         }
 
-        await libraryManager.rebuildEmbySourceIndex(for: source)
+        await libraryManager.rebuildRemoteSourceIndex(for: source)
 
         await MainActor.run {
             isRebuilding = false

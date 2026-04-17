@@ -65,7 +65,7 @@ class LibraryManager: ObservableObject {
 
     // MARK: - Private/Internal Properties
     private var fileWatcherTimer: Timer?
-    private var embyAutoSyncTimer: Timer?
+    private var remoteAutoSyncTimer: Timer?
     private var hasPerformedInitialScan = false
     private var lastThresholdCheckTime: Date = .distantPast
     private let thresholdCheckInterval: TimeInterval = 1.0
@@ -78,10 +78,11 @@ class LibraryManager: ObservableObject {
     internal var folderTrackCounts: [Int64: Int] = [:]
     private var pendingLibraryReload: DispatchWorkItem?
     internal let embyService = EmbyService()
+    internal let navidromeService = NavidromeService()
     internal let iTunesArtworkService = ITunesArtworkService()
-    internal let embyPlaybackCacheManager = EmbyPlaybackCacheManager()
-    internal let embySyncLock = NSLock()
-    internal var activeEmbySyncSourceIDs: Set<UUID> = []
+    internal let remotePlaybackCacheManager = RemotePlaybackCacheManager()
+    internal let remoteSyncLock = NSLock()
+    internal var activeRemoteSyncSourceIDs: Set<UUID> = []
     var embyEnrichmentTasks: [UUID: Task<Void, Never>] = [:]
     var embyEnrichmentRunTokens: [UUID: UUID] = [:]
     var embyEnrichmentProgress: [UUID: (sourceName: String, current: Int, total: Int)] = [:]
@@ -179,7 +180,7 @@ class LibraryManager: ObservableObject {
             task.cancel()
         }
         fileWatcherTimer?.invalidate()
-        embyAutoSyncTimer?.invalidate()
+        remoteAutoSyncTimer?.invalidate()
         // Stop accessing all security scoped resources
         for folder in folders {
             if folder.bookmarkData != nil {
@@ -382,58 +383,58 @@ class LibraryManager: ObservableObject {
         startFileWatcher()
     }
 
-    internal func startEmbyAutoSyncTimer() {
-        embyAutoSyncTimer?.invalidate()
-        embyAutoSyncTimer = nil
+    internal func startRemoteAutoSyncTimer() {
+        remoteAutoSyncTimer?.invalidate()
+        remoteAutoSyncTimer = nil
 
-        guard dataSources.contains(where: { $0.kind == .emby }) else {
-            Logger.info("No Emby sources configured, skipping auto-sync timer")
+        guard dataSources.contains(where: { $0.kind != .local }) else {
+            Logger.info("No remote sources configured, skipping auto-sync timer")
             return
         }
 
-        Logger.info("LibraryManager: Starting Emby auto-sync timer")
+        Logger.info("LibraryManager: Starting remote source auto-sync timer")
 
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
-            self?.syncDueEmbySourcesIfNeeded()
+            self?.syncDueRemoteSourcesIfNeeded()
         }
 
-        embyAutoSyncTimer = Timer.scheduledTimer(withTimeInterval: embyAutoSyncCheckInterval, repeats: true) { [weak self] _ in
-            self?.syncDueEmbySourcesIfNeeded()
+        remoteAutoSyncTimer = Timer.scheduledTimer(withTimeInterval: embyAutoSyncCheckInterval, repeats: true) { [weak self] _ in
+            self?.syncDueRemoteSourcesIfNeeded()
         }
     }
 
-    internal func syncDueEmbySourcesIfNeeded(referenceDate: Date = Date()) {
+    internal func syncDueRemoteSourcesIfNeeded(referenceDate: Date = Date()) {
         guard !NotificationManager.shared.isActivityInProgress else { return }
 
         let dueSources = dataSources.filter { source in
-            shouldAutoSyncEmbySource(source, referenceDate: referenceDate)
+            shouldAutoSyncRemoteSource(source, referenceDate: referenceDate)
         }
         guard !dueSources.isEmpty else { return }
 
         for source in dueSources {
-            Logger.info("Auto-syncing Emby source '\(source.name)'")
+            Logger.info("Auto-syncing \(source.kind.displayName) source '\(source.name)'")
             Task { [weak self] in
-                await self?.syncEmbySource(source, forceFavoriteRefresh: false, showNotifications: false)
+                await self?.syncRemoteSource(source, forceFavoriteRefresh: false, showNotifications: false)
             }
         }
     }
 
-    internal func shouldAutoSyncEmbySource(_ source: LibraryDataSource, referenceDate: Date = Date()) -> Bool {
-        guard source.kind == .emby else { return false }
+    internal func shouldAutoSyncRemoteSource(_ source: LibraryDataSource, referenceDate: Date = Date()) -> Bool {
+        guard source.kind != .local else { return false }
         guard let lastSyncedAt = source.lastSyncedAt else { return true }
-        return referenceDate.timeIntervalSince(lastSyncedAt) >= TimeConstants.twentyFourHours
+        return referenceDate.timeIntervalSince(lastSyncedAt) >= TimeConstants.remoteSourceRevalidationInterval
     }
 
-    internal func beginEmbySync(for sourceId: UUID) -> Bool {
-        embySyncLock.lock()
-        defer { embySyncLock.unlock() }
-        return activeEmbySyncSourceIDs.insert(sourceId).inserted
+    internal func beginRemoteSync(for sourceId: UUID) -> Bool {
+        remoteSyncLock.lock()
+        defer { remoteSyncLock.unlock() }
+        return activeRemoteSyncSourceIDs.insert(sourceId).inserted
     }
 
-    internal func finishEmbySync(for sourceId: UUID) {
-        embySyncLock.lock()
-        activeEmbySyncSourceIDs.remove(sourceId)
-        embySyncLock.unlock()
+    internal func finishRemoteSync(for sourceId: UUID) {
+        remoteSyncLock.lock()
+        activeRemoteSyncSourceIDs.remove(sourceId)
+        remoteSyncLock.unlock()
     }
 
     // MARK: - Database Management
