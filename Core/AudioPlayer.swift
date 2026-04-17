@@ -31,6 +31,7 @@ public enum AudioPlayerError: Error {
     case engineError(Error)
     case seekError
     case invalidState
+    case unsupportedURLScheme(String)
     
     var localizedDescription: String {
         switch self {
@@ -44,6 +45,8 @@ public enum AudioPlayerError: Error {
             return "Failed to seek to position"
         case .invalidState:
             return "Invalid player state for this operation"
+        case .unsupportedURLScheme(let scheme):
+            return "Unsupported audio URL scheme: \(scheme)"
         }
     }
 }
@@ -178,10 +181,19 @@ public class PAudioPlayer: NSObject {
     /// - Parameters:
     ///   - url: The URL of the audio file
     ///   - startPaused: If true, loads the file but doesn't start playback
-    public func play(url: URL, startPaused: Bool = false) {
+    ///   - entryID: Optional stable identifier used for playback event correlation
+    public func play(url: URL, startPaused: Bool = false, entryID: String? = nil) {
         currentURL = url
-        let entryId = AudioEntryId(id: url.lastPathComponent)
+        let entryId = AudioEntryId(id: entryID ?? url.lastPathComponent)
         currentEntryId = entryId
+
+        guard url.isFileURL else {
+            handlePlaybackError(
+                AudioPlayerError.unsupportedURLScheme(url.scheme ?? "unknown"),
+                entryId: entryId
+            )
+            return
+        }
         
         let shouldPreBuffer = Self.shouldPreBuffer(url: url)
         
@@ -583,7 +595,8 @@ public class PAudioPlayer: NSObject {
         Logger.error("Failed to play audio: \(error)")
         state = .stopped
         
-        delegate?.audioPlayerUnexpectedError(player: self, error: .engineError(error))
+        let audioPlayerError = (error as? AudioPlayerError) ?? .engineError(error)
+        delegate?.audioPlayerUnexpectedError(player: self, error: audioPlayerError)
         delegate?.audioPlayerDidFinishPlaying(
             player: self,
             entryId: entryId,

@@ -34,6 +34,10 @@ struct NoMusicEmptyStateView: View {
             }
         }
     }
+
+    private var hasNoLibraryContent: Bool {
+        libraryManager.folders.isEmpty && libraryManager.totalTrackCount == 0
+    }
     
     /// Determines if scanning state should be shown based on context and initial scan progress
     private var shouldShowScanningState: Bool {
@@ -44,7 +48,7 @@ struct NoMusicEmptyStateView: View {
                 return !libraryManager.hasReachedInitialScanThreshold
             }
             // For non-initial scans, show scanning state only if no folders exist
-            return libraryManager.folders.isEmpty
+            return hasNoLibraryContent
         case .settings:
             // Settings always shows scanning state when scanning is active
             return true
@@ -57,7 +61,7 @@ struct NoMusicEmptyStateView: View {
                 // Show scanning animation during initial scan until threshold is reached
                 scanningProgressContent
                     .transition(.opacity)
-            } else if libraryManager.folders.isEmpty {
+            } else if hasNoLibraryContent {
                 // Show empty state only when no folders exist
                 emptyStateContent
                     .transition(.opacity)

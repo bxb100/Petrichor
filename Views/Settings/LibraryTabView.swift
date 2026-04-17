@@ -21,7 +21,7 @@ struct LibraryTabView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            if libraryManager.folders.isEmpty {
+            if libraryManager.folders.isEmpty && libraryManager.totalTrackCount == 0 {
                 // Empty state
                 NoMusicEmptyStateView(context: .settings)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)

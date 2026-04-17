@@ -11,6 +11,7 @@ class AppCoordinator: ObservableObject {
     private(set) static var shared: AppCoordinator?
     let libraryManager: LibraryManager
     let playlistManager: PlaylistManager
+    let sourceManager: SourceManager
     let playbackManager: PlaybackManager
     let nowPlayingManager: NowPlayingManager
     let menuBarManager: MenuBarManager
@@ -32,6 +33,7 @@ class AppCoordinator: ObservableObject {
         // Initialize managers
         libraryManager = LibraryManager()
         playlistManager = PlaylistManager()
+        sourceManager = SourceManager(databaseManager: libraryManager.databaseManager)
         
         // Create audio player with dependencies
         playbackManager = PlaybackManager(libraryManager: libraryManager, playlistManager: playlistManager)
@@ -306,17 +308,14 @@ class AppCoordinator: ObservableObject {
         // Find and prepare the current track
         if let currentTrackId = state.currentTrackId,
            let currentTrack = restoredQueue.first(where: { $0.trackId == currentTrackId }) {
-            // Verify the file exists and is accessible
-            let fileManager = FileManager.default
-            guard fileManager.fileExists(atPath: currentTrack.url.path) else {
-                clearAllSavedState()
-                return
-            }
-            
-            // Try to access the file
-            guard fileManager.isReadableFile(atPath: currentTrack.url.path) else {
-                clearAllSavedState()
-                return
+            if currentTrack.isLocalSource {
+                let fileManager = FileManager.default
+                guard let localFileURL = currentTrack.localFileURL,
+                      fileManager.fileExists(atPath: localFileURL.path),
+                      fileManager.isReadableFile(atPath: localFileURL.path) else {
+                    clearAllSavedState()
+                    return
+                }
             }
             
             // Clear the temporary UI track before setting the real one

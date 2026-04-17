@@ -92,9 +92,9 @@ struct SettingsView: View {
 }
 
 #Preview {
-    SettingsView()
-        .environmentObject({
-            let manager = LibraryManager()
-            return manager
-        }())
+    let libraryManager = LibraryManager()
+
+    return SettingsView()
+        .environmentObject(libraryManager)
+        .environmentObject(SourceManager(databaseManager: libraryManager.databaseManager))
 }

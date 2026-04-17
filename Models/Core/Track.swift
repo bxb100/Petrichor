@@ -6,7 +6,15 @@ import SwiftUI
 struct Track: Identifiable, Equatable, Hashable, FetchableRecord, PersistableRecord {
     let id = UUID()
     var trackId: Int64?
-    let url: URL
+    var storagePath: String
+    var locatorString: String
+    var sourceID: String
+    var sourceItemID: String?
+    var localPath: String?
+    var availabilityRawValue: String
+    var remoteRevision: String?
+    var remoteETag: String?
+    var lastSyncedAt: Date?
     
     // Core metadata for display
     var title: String
@@ -45,16 +53,42 @@ struct Track: Identifiable, Equatable, Hashable, FetchableRecord, PersistableRec
     // Transient properties for album artwork (populated separately)
     var albumArtworkData: Data?
     private static var artworkCache = NSCache<NSString, NSData>()
+
+    var url: URL {
+        if let localFileURL {
+            return localFileURL
+        }
+        if let resolvedURL = URL(string: locatorString) {
+            return resolvedURL
+        }
+        return URL(fileURLWithPath: storagePath)
+    }
+
+    var availability: TrackAvailability {
+        TrackAvailability(rawValue: availabilityRawValue) ?? .local
+    }
+
+    var isLocalSource: Bool {
+        sourceID == SourceKind.local.rawValue
+    }
+
+    var localFileURL: URL? {
+        guard let localPath else { return nil }
+        return URL(fileURLWithPath: localPath)
+    }
     
     var filename: String {
-        url.lastPathComponent
+        if let localPath {
+            return URL(fileURLWithPath: localPath).lastPathComponent
+        }
+        return URL(fileURLWithPath: storagePath).lastPathComponent
     }
     
     var albumArtworkSmall: Data? {
         get {
             guard let original = albumArtworkData else { return nil }
             
-            let cacheKey = "\(trackId?.description ?? url.path)-small" as NSString
+            let cacheKey = "\(trackId?.description ?? storagePath)-small" as NSString
             if let cached = Track.artworkCache.object(forKey: cacheKey) {
                 return cached as Data
             }
@@ -66,7 +100,7 @@ struct Track: Identifiable, Equatable, Hashable, FetchableRecord, PersistableRec
             return nil
         }
         set {
-            let cacheKey = "\(trackId?.description ?? url.path)-small" as NSString
+            let cacheKey = "\(trackId?.description ?? storagePath)-small" as NSString
             if let data = newValue {
                 Track.artworkCache.setObject(data as NSData, forKey: cacheKey)
             }
@@ -77,7 +111,7 @@ struct Track: Identifiable, Equatable, Hashable, FetchableRecord, PersistableRec
         get {
             guard let original = albumArtworkData else { return nil }
             
-            let cacheKey = "\(trackId?.description ?? url.path)-medium" as NSString
+            let cacheKey = "\(trackId?.description ?? storagePath)-medium" as NSString
             if let cached = Track.artworkCache.object(forKey: cacheKey) {
                 return cached as Data
             }
@@ -89,7 +123,7 @@ struct Track: Identifiable, Equatable, Hashable, FetchableRecord, PersistableRec
             return nil
         }
         set {
-            let cacheKey = "\(trackId?.description ?? url.path)-medium" as NSString
+            let cacheKey = "\(trackId?.description ?? storagePath)-medium" as NSString
             if let data = newValue {
                 Track.artworkCache.setObject(data as NSData, forKey: cacheKey)
             }
@@ -100,7 +134,7 @@ struct Track: Identifiable, Equatable, Hashable, FetchableRecord, PersistableRec
         get {
             guard let original = albumArtworkData else { return nil }
             
-            let cacheKey = "\(trackId?.description ?? url.path)-large" as NSString
+            let cacheKey = "\(trackId?.description ?? storagePath)-large" as NSString
             if let cached = Track.artworkCache.object(forKey: cacheKey) {
                 return cached as Data
             }
@@ -112,7 +146,7 @@ struct Track: Identifiable, Equatable, Hashable, FetchableRecord, PersistableRec
             return nil
         }
         set {
-            let cacheKey = "\(trackId?.description ?? url.path)-large" as NSString
+            let cacheKey = "\(trackId?.description ?? storagePath)-large" as NSString
             if let data = newValue {
                 Track.artworkCache.setObject(data as NSData, forKey: cacheKey)
             }
@@ -132,7 +166,15 @@ struct Track: Identifiable, Equatable, Hashable, FetchableRecord, PersistableRec
     // MARK: - Initialization
     
     init(url: URL) {
-        self.url = url
+        self.storagePath = url.path
+        self.locatorString = url.absoluteString
+        self.sourceID = SourceKind.local.rawValue
+        self.sourceItemID = nil
+        self.localPath = url.path
+        self.availabilityRawValue = TrackAvailability.local.rawValue
+        self.remoteRevision = nil
+        self.remoteETag = nil
+        self.lastSyncedAt = nil
         
         // Default values - these will be overridden by metadata
         self.title = url.deletingPathExtension().lastPathComponent
@@ -162,6 +204,14 @@ struct Track: Identifiable, Equatable, Hashable, FetchableRecord, PersistableRec
         static let trackId = Column("id")
         static let folderId = Column("folder_id")
         static let path = Column("path")
+        static let sourceID = Column("source_id")
+        static let sourceItemID = Column("source_item_id")
+        static let locator = Column("locator")
+        static let localPath = Column("local_path")
+        static let availability = Column("availability")
+        static let remoteRevision = Column("remote_revision")
+        static let remoteETag = Column("remote_etag")
+        static let lastSyncedAt = Column("last_synced_at")
         static let filename = Column("filename")
         static let title = Column("title")
         static let artist = Column("artist")
@@ -186,9 +236,15 @@ struct Track: Identifiable, Equatable, Hashable, FetchableRecord, PersistableRec
     // MARK: - FetchableRecord
     
     init(row: Row) throws {
-        // Extract path and create URL
-        let path: String = row[Columns.path]
-        self.url = URL(fileURLWithPath: path)
+        storagePath = row[Columns.path]
+        sourceID = row[Columns.sourceID] ?? SourceKind.local.rawValue
+        sourceItemID = row[Columns.sourceItemID]
+        localPath = row[Columns.localPath] ?? (sourceID == SourceKind.local.rawValue ? storagePath : nil)
+        availabilityRawValue = row[Columns.availability] ?? TrackAvailability.local.rawValue
+        remoteRevision = row[Columns.remoteRevision]
+        remoteETag = row[Columns.remoteETag]
+        lastSyncedAt = row[Columns.lastSyncedAt]
+        locatorString = row[Columns.locator] ?? URL(fileURLWithPath: storagePath).absoluteString
         self.format = row[Columns.format]
         
         // Core properties
@@ -229,7 +285,16 @@ struct Track: Identifiable, Equatable, Hashable, FetchableRecord, PersistableRec
         // Only encode the lightweight fields when saving
         container[Columns.trackId] = trackId
         container[Columns.folderId] = folderId
-        container[Columns.path] = url.path
+        container[Columns.path] = storagePath
+        container[Columns.sourceID] = sourceID
+        container[Columns.sourceItemID] = sourceItemID
+        container[Columns.locator] = locatorString
+        container[Columns.localPath] = localPath
+        container[Columns.availability] = availabilityRawValue
+        container[Columns.remoteRevision] = remoteRevision
+        container[Columns.remoteETag] = remoteETag
+        container[Columns.lastSyncedAt] = lastSyncedAt
+        container[Columns.filename] = filename
         container[Columns.title] = title
         container[Columns.artist] = artist
         container[Columns.album] = album
@@ -331,6 +396,14 @@ extension Track {
             Columns.trackId,
             Columns.folderId,
             Columns.path,
+            Columns.sourceID,
+            Columns.sourceItemID,
+            Columns.locator,
+            Columns.localPath,
+            Columns.availability,
+            Columns.remoteRevision,
+            Columns.remoteETag,
+            Columns.lastSyncedAt,
             Columns.title,
             Columns.artist,
             Columns.album,

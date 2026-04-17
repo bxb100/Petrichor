@@ -1,6 +1,11 @@
 import Foundation
 import GRDB
 
+enum FolderKind: String, Codable, Sendable {
+    case local
+    case sourceVirtual
+}
+
 struct Folder: Identifiable, Hashable, Codable, FetchableRecord, PersistableRecord {
     var id: Int64?
     let url: URL
@@ -10,6 +15,8 @@ struct Folder: Identifiable, Hashable, Codable, FetchableRecord, PersistableReco
     var dateUpdated: Date
     var bookmarkData: Data?
     var shasumHash: String?
+    var kindRawValue: String
+    var sourceAccountID: String?
 
     // MARK: - Initialization
 
@@ -21,6 +28,25 @@ struct Folder: Identifiable, Hashable, Codable, FetchableRecord, PersistableReco
         self.dateAdded = Date()
         self.dateUpdated = Date()
         self.bookmarkData = bookmarkData
+        self.kindRawValue = FolderKind.local.rawValue
+        self.sourceAccountID = nil
+    }
+
+    init(
+        virtualSourcePath: String,
+        sourceAccountID: String,
+        name: String
+    ) {
+        self.id = nil
+        self.url = URL(fileURLWithPath: virtualSourcePath)
+        self.name = name
+        self.trackCount = 0
+        self.dateAdded = Date()
+        self.dateUpdated = Date()
+        self.bookmarkData = nil
+        self.shasumHash = nil
+        self.kindRawValue = FolderKind.sourceVirtual.rawValue
+        self.sourceAccountID = sourceAccountID
     }
 
     // MARK: - DB Configuration
@@ -36,13 +62,24 @@ struct Folder: Identifiable, Hashable, Codable, FetchableRecord, PersistableReco
         static let dateUpdated = Column("date_updated")
         static let bookmarkData = Column("bookmark_data")
         static let shasumHash = Column("shasum_hash")
+        static let kind = Column("kind")
+        static let sourceAccountID = Column("source_account_id")
     }
 
     // MARK: - Coding Keys
 
     enum CodingKeys: String, CodingKey {
         case id, name, trackCount, dateAdded, dateUpdated, shasumHash
+        case kindRawValue, sourceAccountID
         case path // For database storage
+    }
+
+    var kind: FolderKind {
+        FolderKind(rawValue: kindRawValue) ?? .local
+    }
+
+    var isVisibleInLibrary: Bool {
+        kind == .local
     }
 
     // MARK: - Codable
@@ -54,6 +91,8 @@ struct Folder: Identifiable, Hashable, Codable, FetchableRecord, PersistableReco
         trackCount = try container.decode(Int.self, forKey: .trackCount)
         dateAdded = try container.decode(Date.self, forKey: .dateAdded)
         dateUpdated = try container.decode(Date.self, forKey: .dateUpdated)
+        kindRawValue = try container.decodeIfPresent(String.self, forKey: .kindRawValue) ?? FolderKind.local.rawValue
+        sourceAccountID = try container.decodeIfPresent(String.self, forKey: .sourceAccountID)
         let path = try container.decode(String.self, forKey: .path)
         url = URL(fileURLWithPath: path)
     }
@@ -65,6 +104,8 @@ struct Folder: Identifiable, Hashable, Codable, FetchableRecord, PersistableReco
         try container.encode(trackCount, forKey: .trackCount)
         try container.encode(dateAdded, forKey: .dateAdded)
         try container.encode(dateUpdated, forKey: .dateUpdated)
+        try container.encode(kindRawValue, forKey: .kindRawValue)
+        try container.encodeIfPresent(sourceAccountID, forKey: .sourceAccountID)
         try container.encode(url.path, forKey: .path)
     }
 
@@ -78,6 +119,8 @@ struct Folder: Identifiable, Hashable, Codable, FetchableRecord, PersistableReco
         dateUpdated = row[Columns.dateUpdated]
         bookmarkData = row[Columns.bookmarkData]
         shasumHash = row[Columns.shasumHash]
+        kindRawValue = row[Columns.kind] ?? FolderKind.local.rawValue
+        sourceAccountID = row[Columns.sourceAccountID]
 
         let path: String = row[Columns.path]
         url = URL(fileURLWithPath: path)
@@ -94,6 +137,8 @@ struct Folder: Identifiable, Hashable, Codable, FetchableRecord, PersistableReco
         container[Columns.dateUpdated] = dateUpdated
         container[Columns.bookmarkData] = bookmarkData
         container[Columns.shasumHash] = shasumHash
+        container[Columns.kind] = kindRawValue
+        container[Columns.sourceAccountID] = sourceAccountID
     }
 
     // Auto-incrementing id

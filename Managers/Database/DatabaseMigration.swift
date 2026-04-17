@@ -33,9 +33,7 @@ enum DatabaseMigrator {
         }
         
         migrator.registerMigration("v2_add_folder_content_hash") { db in
-            try db.alter(table: "folders") { t in
-                t.add(column: "shasum_hash", .text)
-            }
+            try db.addColumnIfNotExists(table: "folders", column: "shasum_hash", type: .text)
             Logger.info("Added shasum_hash column to folders table")
         }
         
@@ -121,9 +119,7 @@ enum DatabaseMigrator {
         }
         
         migrator.registerMigration("v5_add_lossless_column") { db in
-            try db.alter(table: "tracks") { t in
-                t.add(column: "lossless", .boolean)
-            }
+            try db.addColumnIfNotExists(table: "tracks", column: "lossless", type: .boolean)
             Logger.info("v5_add_lossless_column migration completed")
         }
         
@@ -140,7 +136,7 @@ enum DatabaseMigrator {
         }
 
         migrator.registerMigration("v7_create_background_migrations_table") { db in
-            try db.create(table: "background_migrations") { t in
+            try db.createTableIfNotExists("background_migrations") { t in
                 t.column("identifier", .text).primaryKey()
                 t.column("completed_at", .datetime)
                 t.column("progress", .text)
@@ -151,7 +147,7 @@ enum DatabaseMigrator {
         
         migrator.registerMigration("v8_convert_artwork_to_heic") { db in
             try db.execute(
-                sql: "INSERT INTO background_migrations (identifier, resumable) VALUES (?, ?)",
+                sql: "INSERT OR IGNORE INTO background_migrations (identifier, resumable) VALUES (?, ?)",
                 arguments: ["v8_background_convert_artwork_to_heic", true]
             )
             Logger.info("v8_convert_artwork_to_heic: flagged for background artwork conversion")
@@ -159,24 +155,103 @@ enum DatabaseMigrator {
         
         migrator.registerMigration("v9_rebuild_artist_associations") { db in
             try db.execute(
-                sql: "INSERT INTO background_migrations (identifier, resumable) VALUES (?, ?)",
+                sql: "INSERT OR IGNORE INTO background_migrations (identifier, resumable) VALUES (?, ?)",
                 arguments: ["v9_background_rebuild_artist_associations", true]
             )
             Logger.info("v9_rebuild_artist_associations: flagged for background artist rebuild")
         }
 
+        migrator.registerMigration("v10_add_source_accounts_and_track_source_columns") { db in
+            try DatabaseManager.createSourceAccountsTable(in: db)
+
+            try db.addColumnIfNotExists(
+                table: "tracks",
+                column: "source_id",
+                type: .text,
+                defaultValue: SourceKind.local.rawValue,
+                notNull: true
+            )
+            try db.addColumnIfNotExists(table: "tracks", column: "source_item_id", type: .text)
+            try db.addColumnIfNotExists(table: "tracks", column: "locator", type: .text)
+            try db.addColumnIfNotExists(table: "tracks", column: "local_path", type: .text)
+            try db.addColumnIfNotExists(
+                table: "tracks",
+                column: "availability",
+                type: .text,
+                defaultValue: TrackAvailability.local.rawValue,
+                notNull: true
+            )
+            try db.addColumnIfNotExists(table: "tracks", column: "remote_revision", type: .text)
+            try db.addColumnIfNotExists(table: "tracks", column: "remote_etag", type: .text)
+            try db.addColumnIfNotExists(table: "tracks", column: "last_synced_at", type: .datetime)
+
+            try db.execute(
+                sql: """
+                    UPDATE tracks
+                    SET locator = COALESCE(locator, path),
+                        local_path = COALESCE(local_path, path),
+                        source_id = COALESCE(source_id, ?),
+                        availability = COALESCE(availability, ?)
+                    WHERE locator IS NULL
+                       OR local_path IS NULL
+                       OR source_id IS NULL
+                       OR availability IS NULL
+                    """,
+                arguments: [SourceKind.local.rawValue, TrackAvailability.local.rawValue]
+            )
+
+            try db.createIndexIfNotExists(name: "idx_tracks_source_id", table: "tracks", columns: ["source_id"])
+            try db.createIndexIfNotExists(name: "idx_tracks_source_item_id", table: "tracks", columns: ["source_item_id"])
+            try db.createIndexIfNotExists(
+                name: "idx_tracks_source_remote_item",
+                table: "tracks",
+                columns: ["source_id", "source_item_id"],
+                unique: true
+            )
+            try db.createIndexIfNotExists(name: "idx_tracks_availability", table: "tracks", columns: ["availability"])
+            try db.createIndexIfNotExists(name: "idx_source_accounts_kind", table: "source_accounts", columns: ["kind"])
+            try db.createIndexIfNotExists(name: "idx_source_accounts_enabled", table: "source_accounts", columns: ["is_enabled"])
+
+            Logger.info("v10_add_source_accounts_and_track_source_columns migration completed")
+        }
+
+        migrator.registerMigration("v11_add_folder_kinds_for_remote_sources") { db in
+            try db.addColumnIfNotExists(
+                table: "folders",
+                column: "kind",
+                type: .text,
+                defaultValue: FolderKind.local.rawValue,
+                notNull: true
+            )
+            try db.addColumnIfNotExists(table: "folders", column: "source_account_id", type: .text)
+
+            try db.execute(
+                sql: """
+                    UPDATE folders
+                    SET kind = COALESCE(kind, ?)
+                    WHERE kind IS NULL OR kind = ''
+                    """,
+                arguments: [FolderKind.local.rawValue]
+            )
+
+            try db.createIndexIfNotExists(name: "idx_folders_kind", table: "folders", columns: ["kind"])
+            try db.createIndexIfNotExists(name: "idx_folders_source_account_id", table: "folders", columns: ["source_account_id"])
+
+            Logger.info("v11_add_folder_kinds_for_remote_sources migration completed")
+        }
+
         // TODO: Uncomment in next minor release to add filename index for playlist import performance
-        // migrator.registerMigration("v10_add_filename_index_for_playlist_import") { db in
+        // migrator.registerMigration("v12_add_filename_index_for_playlist_import") { db in
         //     try db.createIndexIfNotExists(
         //         name: "idx_tracks_filename",
         //         table: "tracks",
         //         columns: ["filename"]
         //     )
-        //     Logger.info("v10_add_filename_index_for_playlist_import migration completed")
+        //     Logger.info("v12_add_filename_index_for_playlist_import migration completed")
         // }
 
         // MARK: - Future Migrations
-        // Add new migrations here as: migrator.registerMigration("v11_description") { db in ... }
+        // Add new migrations here as: migrator.registerMigration("v12_description") { db in ... }
         
         return migrator
     }

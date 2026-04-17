@@ -21,6 +21,7 @@ struct PetrichorApp: App {
                 .environmentObject(appCoordinator.playbackManager.playbackProgressState)
                 .environmentObject(appCoordinator.libraryManager)
                 .environmentObject(appCoordinator.playlistManager)
+                .environmentObject(appCoordinator.sourceManager)
                 .onReceive(appCoordinator.playlistManager.$repeatMode) { _ in
                     menuUpdateTrigger = UUID()
                 }

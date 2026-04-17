@@ -146,14 +146,14 @@ enum TrackProcessResult {
     case skipped
 }
 
-enum DatabaseError: Error {
+enum DatabaseError: LocalizedError {
     case invalidTrackId
     case invalidFolderId
     case updateFailed
     case migrationFailed(String)
     case scanFailed(String)
     
-    var localizedDescription: String {
+    var errorDescription: String? {
         switch self {
         case .invalidTrackId:
             return "Invalid track ID"

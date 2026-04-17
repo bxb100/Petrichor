@@ -12,7 +12,7 @@ struct AboutTabView: View {
 
                 appInfoSection
 
-                if !libraryManager.folders.isEmpty {
+                if libraryManager.totalTrackCount > 0 || !libraryManager.folders.isEmpty {
                     libraryStatisticsSection
                 }
 
@@ -24,7 +24,7 @@ struct AboutTabView: View {
             }
             .padding()
         }
-        .scrollDisabled(libraryManager.folders.isEmpty)
+        .scrollDisabled(libraryManager.totalTrackCount == 0 && libraryManager.folders.isEmpty)
         .background(Color.clear)
     }
 

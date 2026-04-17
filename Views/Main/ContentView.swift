@@ -44,7 +44,7 @@ struct ContentView: View {
             mainContentArea
 
             playerControls
-                .animation(.easeInOut(duration: 0.3), value: libraryManager.folders.isEmpty)
+                .animation(.easeInOut(duration: 0.3), value: libraryManager.shouldShowMainUI)
         }
         .onKeyPress(.space) {
             if isCurrentlyEditingText() {
@@ -247,7 +247,7 @@ struct ContentView: View {
                 items: Sections.allCases.filter { $0 != .folders || showFoldersTab },
                 selection: $selectedTab,
                 animation: .transform,
-                isDisabled: libraryManager.folders.isEmpty
+                isDisabled: !libraryManager.shouldShowMainUI
             )
         }
         
@@ -286,7 +286,7 @@ struct ContentView: View {
                 selection: $selectedTab,
                 style: .modern,
                 animation: .transform,
-                isDisabled: libraryManager.folders.isEmpty
+                isDisabled: !libraryManager.shouldShowMainUI
             )
         }
         

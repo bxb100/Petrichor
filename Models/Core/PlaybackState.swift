@@ -12,11 +12,14 @@ struct PlaybackUIState: Codable {
 }
 
 struct PlaybackState: Codable {
-    static let currentVersion = 1
+    static let currentVersion = 2
     let version: Int
 
     // Track identification
     let currentTrackPath: String?
+    let currentTrackLocator: String?
+    let currentTrackSourceID: String?
+    let currentTrackSourceItemID: String?
     let currentTrackId: Int64?
 
     // Playback position
@@ -26,6 +29,7 @@ struct PlaybackState: Codable {
     // Queue state
     let queueVisible: Bool
     let queueTrackPaths: [String]
+    let queueTrackLocators: [String]
     let queueTrackIds: [Int64]
     let currentQueueIndex: Int
     let queueSource: String // "library", "folder", "playlist"
@@ -56,12 +60,16 @@ struct PlaybackState: Codable {
     ) {
         self.version = Self.currentVersion
         self.currentTrackPath = currentTrack?.url.path
+        self.currentTrackLocator = currentTrack?.locatorString
+        self.currentTrackSourceID = currentTrack?.sourceID
+        self.currentTrackSourceItemID = currentTrack?.sourceItemID
         self.currentTrackId = currentTrack?.trackId
         self.playbackPosition = playbackPosition
         self.trackDuration = currentTrack?.duration ?? 0
 
         self.queueVisible = queueVisible
         self.queueTrackPaths = queue.map { $0.url.path }
+        self.queueTrackLocators = queue.map(\.locatorString)
         self.queueTrackIds = queue.compactMap { $0.trackId }
         self.currentQueueIndex = currentQueueIndex
 
@@ -109,10 +117,14 @@ struct PlaybackState: Codable {
 
         // Decode all other properties
         self.currentTrackPath = try container.decodeIfPresent(String.self, forKey: .currentTrackPath)
+        self.currentTrackLocator = try container.decodeIfPresent(String.self, forKey: .currentTrackLocator)
+        self.currentTrackSourceID = try container.decodeIfPresent(String.self, forKey: .currentTrackSourceID)
+        self.currentTrackSourceItemID = try container.decodeIfPresent(String.self, forKey: .currentTrackSourceItemID)
         self.currentTrackId = try container.decodeIfPresent(Int64.self, forKey: .currentTrackId)
         self.playbackPosition = try container.decode(Double.self, forKey: .playbackPosition)
         self.trackDuration = try container.decode(Double.self, forKey: .trackDuration)
         self.queueTrackPaths = try container.decode([String].self, forKey: .queueTrackPaths)
+        self.queueTrackLocators = try container.decodeIfPresent([String].self, forKey: .queueTrackLocators) ?? []
         self.queueTrackIds = try container.decode([Int64].self, forKey: .queueTrackIds)
         self.currentQueueIndex = try container.decode(Int.self, forKey: .currentQueueIndex)
         self.queueSource = try container.decode(String.self, forKey: .queueSource)

@@ -13,6 +13,7 @@ extension DatabaseManager {
     static func setupDatabaseSchema(in db: Database) throws {
         // Create tables in dependency order
         try createFoldersTable(in: db)
+        try createSourceAccountsTable(in: db)
         try createArtistsTable(in: db)
         try createAlbumsTable(in: db)
         try createAlbumArtistsTable(in: db)
@@ -46,8 +47,31 @@ extension DatabaseManager {
             t.column("date_added", .datetime).notNull()
             t.column("date_updated", .datetime).notNull()
             t.column("bookmark_data", .blob)
+            t.column("shasum_hash", .text)
+            t.column("kind", .text).notNull().defaults(to: FolderKind.local.rawValue)
+            t.column("source_account_id", .text)
         }
         Logger.info("Created `folders` table")
+    }
+
+    // MARK: - Source Accounts Table
+    static func createSourceAccountsTable(in db: Database) throws {
+        try db.createTableIfNotExists("source_accounts") { t in
+            t.column("id", .text).primaryKey()
+            t.column("kind", .text).notNull()
+            t.column("display_name", .text).notNull()
+            t.column("base_url", .text).notNull()
+            t.column("username", .text).notNull()
+            t.column("user_id", .text)
+            t.column("device_id", .text).notNull()
+            t.column("token_ref", .text).notNull()
+            t.column("is_enabled", .boolean).notNull().defaults(to: true)
+            t.column("created_at", .datetime).notNull()
+            t.column("updated_at", .datetime).notNull()
+            t.column("last_sync_at", .datetime)
+            t.column("sync_cursor", .text)
+        }
+        Logger.info("Created `source_accounts` table")
     }
 
     // MARK: - Artists Table
@@ -160,6 +184,14 @@ extension DatabaseManager {
             t.column("folder_id", .integer).notNull().references("folders", onDelete: .cascade)
             t.column("album_id", .integer).references("albums", onDelete: .setNull)
             t.column("path", .text).notNull().unique()
+            t.column("source_id", .text).notNull().defaults(to: SourceKind.local.rawValue)
+            t.column("source_item_id", .text)
+            t.column("locator", .text)
+            t.column("local_path", .text)
+            t.column("availability", .text).notNull().defaults(to: TrackAvailability.local.rawValue)
+            t.column("remote_revision", .text)
+            t.column("remote_etag", .text)
+            t.column("last_synced_at", .datetime)
             t.column("filename", .text).notNull()
             t.column("title", .text)
             t.column("artist", .text)
@@ -382,6 +414,15 @@ extension DatabaseManager {
         // Tracks table indices
         try db.createIndexIfNotExists(name: "idx_tracks_folder_id", table: "tracks", columns: ["folder_id"])
         try db.createIndexIfNotExists(name: "idx_tracks_album_id", table: "tracks", columns: ["album_id"])
+        try db.createIndexIfNotExists(name: "idx_tracks_source_id", table: "tracks", columns: ["source_id"])
+        try db.createIndexIfNotExists(name: "idx_tracks_source_item_id", table: "tracks", columns: ["source_item_id"])
+        try db.createIndexIfNotExists(
+            name: "idx_tracks_source_remote_item",
+            table: "tracks",
+            columns: ["source_id", "source_item_id"],
+            unique: true
+        )
+        try db.createIndexIfNotExists(name: "idx_tracks_availability", table: "tracks", columns: ["availability"])
         try db.createIndexIfNotExists(name: "idx_tracks_artist", table: "tracks", columns: ["artist"])
         try db.createIndexIfNotExists(name: "idx_tracks_album", table: "tracks", columns: ["album"])
         try db.createIndexIfNotExists(name: "idx_tracks_composer", table: "tracks", columns: ["composer"])
@@ -462,10 +503,16 @@ extension DatabaseManager {
         )
         
         try db.createIndexIfNotExists(name: "idx_track_genres_genre_id", table: "track_genres", columns: ["genre_id"])
-        
+
         // Pinned items indices
         try db.createIndexIfNotExists(name: "idx_pinned_items_sort_order", table: "pinned_items", columns: ["sort_order"])
         try db.createIndexIfNotExists(name: "idx_pinned_items_item_type", table: "pinned_items", columns: ["item_type"])
+
+        // Source accounts indices
+        try db.createIndexIfNotExists(name: "idx_source_accounts_kind", table: "source_accounts", columns: ["kind"])
+        try db.createIndexIfNotExists(name: "idx_source_accounts_enabled", table: "source_accounts", columns: ["is_enabled"])
+        try db.createIndexIfNotExists(name: "idx_folders_kind", table: "folders", columns: ["kind"])
+        try db.createIndexIfNotExists(name: "idx_folders_source_account_id", table: "folders", columns: ["source_account_id"])
 
         Logger.info("Created column indices")
     }

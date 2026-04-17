@@ -49,13 +49,21 @@ class LibraryManager: ObservableObject {
     }
     
     var shouldShowMainUI: Bool {
+        if totalTrackCount > 0 {
+            // Preserve the onboarding threshold for first-time local scans,
+            // but don't hide an already-synced remote library behind folder state.
+            if isInitialOnboardingScan && !folders.isEmpty {
+                return hasReachedInitialScanThreshold
+            }
+            return true
+        }
+
         guard !folders.isEmpty else { return false }
-        
-        // If we're in initial onboarding scan, only show UI after threshold is reached
+
         if isInitialOnboardingScan {
             return hasReachedInitialScanThreshold
         }
-        
+
         return true
     }
 

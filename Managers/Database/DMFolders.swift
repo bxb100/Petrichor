@@ -169,6 +169,10 @@ extension DatabaseManager {
         do {
             return try dbQueue.read { db in
                 try Folder
+                    .filter(
+                        Folder.Columns.kind == FolderKind.local.rawValue ||
+                        Folder.Columns.kind == nil
+                    )
                     .order(Folder.Columns.name)
                     .fetchAll(db)
             }

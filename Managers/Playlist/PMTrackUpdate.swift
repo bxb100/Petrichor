@@ -21,6 +21,7 @@ extension PlaylistManager {
         do {
             if let dbManager = libraryManager?.databaseManager {
                 try await dbManager.updateTrackFavoriteStatus(trackId: trackId, isFavorite: isFavorite)
+                await syncFavoriteStatusToRemoteSource(for: track, isFavorite: isFavorite)
 
                 Logger.info("Updated favorite status for track: \(track.title) to \(isFavorite)")
                 
@@ -45,6 +46,56 @@ extension PlaylistManager {
             }
         } catch {
             Logger.error("Failed to update favorite status: \(error)")
+        }
+    }
+
+    private func syncFavoriteStatusToRemoteSource(for track: Track, isFavorite: Bool) async {
+        guard !track.isLocalSource else {
+            return
+        }
+
+        guard let sourceItemID = track.sourceItemID, !sourceItemID.isEmpty else {
+            Logger.warning("Skipping remote favorite sync for \(track.title): missing source item ID")
+            return
+        }
+
+        guard let dbManager = libraryManager?.databaseManager,
+              let account = dbManager.getSourceAccount(id: track.sourceID) else {
+            Logger.warning("Skipping remote favorite sync for \(track.title): missing source account")
+            return
+        }
+
+        let sourceKind = account.kind
+        guard sourceKind != .local else {
+            Logger.warning("Skipping remote favorite sync for \(track.title): unknown remote source")
+            return
+        }
+
+        guard let credential = KeychainManager.retrieve(key: account.tokenRef), !credential.isEmpty else {
+            Logger.warning("Skipping remote favorite sync for \(track.title): missing source credential")
+            return
+        }
+
+        do {
+            guard let provider = await SourceRegistry.shared.provider(for: sourceKind) else {
+                Logger.warning("Skipping remote favorite sync for \(track.title): provider unavailable")
+                return
+            }
+
+            try await provider.setFavorite(
+                account: account,
+                credential: credential,
+                itemID: sourceItemID,
+                isFavorite: isFavorite
+            )
+
+            Logger.info("Synced favorite status to \(sourceKind.displayName) for track: \(track.title)")
+        } catch {
+            Logger.warning("Failed to sync favorite status to \(sourceKind.displayName): \(error.localizedDescription)")
+            NotificationManager.shared.addMessage(
+                .warning,
+                "Updated favorite locally, but failed to sync \(track.title) to \(sourceKind.displayName)"
+            )
         }
     }
 
